@@ -51,3 +51,51 @@ CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at);
 CREATE INDEX IF NOT EXISTS idx_posts_author      ON posts(author_id);
 CREATE INDEX IF NOT EXISTS idx_posts_source      ON posts(source);
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_step_time ON pipeline_runs(step, started_at);
+
+-- Synthesis tables (added in Phase 0 step 5)
+-- A digest is one press at one time. It contains multiple stories. Each
+-- story references multiple posts via story_posts. Clusters are in-memory
+-- only; the cluster_method column records which algorithm produced the cluster.
+
+CREATE TABLE IF NOT EXISTS stories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  digest_id INTEGER,                       -- NULL until assigned to a digest
+  headline TEXT,
+  story TEXT,                              -- multi-paragraph narrative; [post:ID] inline citations
+  key_quotes TEXT,                         -- JSON: array of {post_id, quote, speaker, used_in_story}
+  media_references TEXT,                   -- JSON: array of {post_id, url, description, used_in_story}
+  topic TEXT,
+  tags TEXT,                               -- JSON array
+  coverage_type TEXT DEFAULT 'one_shot',    -- 'one_shot' | 'ongoing'
+  continuity_story_id INTEGER,             -- if this is a follow-up to an earlier story
+  what_changed TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER,
+  post_count INTEGER,
+  total_score REAL,
+  cluster_method TEXT                      -- 'shared_link', 'embedding', etc.
+);
+
+CREATE TABLE IF NOT EXISTS story_posts (
+  story_id INTEGER NOT NULL,
+  post_id INTEGER NOT NULL,
+  relevance REAL DEFAULT 1.0,              -- 0-1; how central this post is to the story
+  PRIMARY KEY (story_id, post_id)
+);
+
+CREATE TABLE IF NOT EXISTS digests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period_start INTEGER NOT NULL,
+  period_end INTEGER NOT NULL,
+  generated_at INTEGER NOT NULL,
+  duration_estimate_minutes REAL,          -- pre-flight reading-time estimate
+  story_count INTEGER,
+  topics TEXT,                             -- JSON: what was in scope
+  sources TEXT,                            -- JSON: which sources contributed posts
+  model_versions TEXT                      -- JSON: which model(s) produced each story
+);
+
+CREATE INDEX IF NOT EXISTS idx_stories_digest       ON stories(digest_id);
+CREATE INDEX IF NOT EXISTS idx_stories_topic        ON stories(topic);
+CREATE INDEX IF NOT EXISTS idx_digests_period       ON digests(period_start, period_end);
+CREATE INDEX IF NOT EXISTS idx_story_posts_post     ON story_posts(post_id);
