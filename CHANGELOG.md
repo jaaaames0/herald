@@ -469,3 +469,22 @@ forced-failure paths.
 **Files touched:** `parser.py`, `herald_context.py`, `herald_synthesise.py`,
 `test_mock_bird`, `test_parser_v2.py`.
 
+
+## 2026-07-05 — Tests 18-20 (Phase 3.5.1 robustness)
+
+Three more test cases for the recursive walker. All pass.
+
+- **Test 18** (pure reply chain, no quotes): A→B→C→D with no `quotedTweet`
+  anywhere. Walker follows reply edges until `HERALD_REPLY_PARENT_DEPTH`
+  cap. Fixtures: `3000000000000001`–`3000000000000004` in `test_mock_bird`.
+- **Test 19** (cycle protection): A↔B (A replies B, B replies A).
+  `visited` set breaks the back-edge cleanly. Fixtures:
+  `3100000000000001`–`3100000000000002`.
+- **Test 20** (quote-depth cap): 8-level deep quote chain, walker fetches
+  levels 2–5 (4 fetches) and stops at `HERALD_QUOTE_DEPTH=5`. Levels 6–8
+  must NOT be cached. Fixtures: `4000000000000001`–`4000000000000008`.
+  Inline level-1 fixture switched from raw bird shape (`quotedTweet`
+  camelCase) to parsed shape (`quoted_tweet` snake_case) — the walker
+  reads the parsed form after loading from cache.
+
+`test_parser_v2.py` is now 20 tests, all green.

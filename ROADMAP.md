@@ -128,6 +128,13 @@ shared budget, ~4 such chains per collect before trim.
 
 **Tests:** 5 new cases (13–17). All pass.
 
+**Additional tests added 2026-07-05** (18–20) — robustness coverage:
+- 18: pure reply chain (A→B→C→D, no quotes) — walker follows reply edges to depth cap
+- 19: cycle protection (A↔B) — visited set breaks the back-edge
+- 20: 8-level deep quote chain with `HERALD_QUOTE_DEPTH=5` — walker fetches 4 (levels 2–5), stops, leaves 6–8 uncached
+
+20/20 green.
+
 ---
 
 ## Phase 4 — Multi-source ⏭ PLANNED
