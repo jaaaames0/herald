@@ -244,6 +244,195 @@ QUOTE_CHAIN = {
             }
         },
     },
+    # ---- Phase 3.5.1 robustness fixtures (different patterns) ----
+
+    # ---- Pure reply chain (no quotes): A replies B replies C replies D ----
+    # Tests HERALD_FOLLOW_REPLY_PARENTS=True with NO quote chains.
+    # Walker should follow reply edges until reply_depth cap.
+    "3000000000000001": {
+        "id": "3000000000000001",
+        "text": "PURE-REPLY-1: I'm responding to B here",
+        "createdAt": "Thu Jul 02 22:00:00 +0000 2026",
+        "conversationId": "3000000000000002",  # B's conversation
+        "inReplyToStatusId": "3000000000000002",
+        "author": {"username": "pure_reply_a", "name": "Reply A"},
+        "authorId": "3001",
+        # No quotedTweet — pure reply
+        "_raw": {
+            "legacy": {
+                "id_str": "3000000000000001",
+                "in_reply_to_status_id_str": "3000000000000002",
+                "conversation_id_str": "3000000000000002",
+            }
+        },
+    },
+    "3000000000000002": {
+        "id": "3000000000000002",
+        "text": "PURE-REPLY-2: B replies to C",
+        "createdAt": "Thu Jul 02 21:55:00 +0000 2026",
+        "conversationId": "3000000000000003",
+        "inReplyToStatusId": "3000000000000003",
+        "author": {"username": "pure_reply_b", "name": "Reply B"},
+        "authorId": "3002",
+        "_raw": {
+            "legacy": {
+                "id_str": "3000000000000002",
+                "in_reply_to_status_id_str": "3000000000000003",
+                "conversation_id_str": "3000000000000003",
+            }
+        },
+    },
+    "3000000000000003": {
+        "id": "3000000000000003",
+        "text": "PURE-REPLY-3: C replies to D",
+        "createdAt": "Thu Jul 02 21:50:00 +0000 2026",
+        "conversationId": "3000000000000004",
+        "inReplyToStatusId": "3000000000000004",
+        "author": {"username": "pure_reply_c", "name": "Reply C"},
+        "authorId": "3003",
+        "_raw": {
+            "legacy": {
+                "id_str": "3000000000000003",
+                "in_reply_to_status_id_str": "3000000000000004",
+                "conversation_id_str": "3000000000000004",
+            }
+        },
+    },
+    "3000000000000004": {
+        "id": "3000000000000004",
+        "text": "PURE-REPLY-4: D is the root",
+        "createdAt": "Thu Jul 02 21:45:00 +0000 2026",
+        "conversationId": "3000000000000004",
+        "author": {"username": "pure_reply_d", "name": "Reply D"},
+        "authorId": "3004",
+        # No inReplyToStatusId — terminal (D is the conversation root)
+        "_raw": {
+            "legacy": {
+                "id_str": "3000000000000004",
+                "conversation_id_str": "3000000000000004",
+            }
+        },
+    },
+
+    # ---- Cycle: A replies to B, B replies to A ----
+    # Tests visited-set cycle protection.
+    "3100000000000001": {
+        "id": "3100000000000001",
+        "text": "CYCLE-1: A replies to B (and B replies to A)",
+        "createdAt": "Thu Jul 02 20:00:00 +0000 2026",
+        "conversationId": "3100000000000002",
+        "inReplyToStatusId": "3100000000000002",  # → B
+        "author": {"username": "cycle_a", "name": "Cycle A"},
+        "authorId": "3101",
+        "_raw": {
+            "legacy": {
+                "id_str": "3100000000000001",
+                "in_reply_to_status_id_str": "3100000000000002",
+                "conversation_id_str": "3100000000000002",
+            }
+        },
+    },
+    "3100000000000002": {
+        "id": "3100000000000002",
+        "text": "CYCLE-2: B replies to A (back-edge)",
+        "createdAt": "Thu Jul 02 20:01:00 +0000 2026",
+        "conversationId": "3100000000000002",
+        "inReplyToStatusId": "3100000000000001",  # → A (creates cycle)
+        "author": {"username": "cycle_b", "name": "Cycle B"},
+        "authorId": "3102",
+        "_raw": {
+            "legacy": {
+                "id_str": "3100000000000002",
+                "in_reply_to_status_id_str": "3100000000000001",
+                "conversation_id_str": "3100000000000002",
+            }
+        },
+    },
+
+    # ---- Deep quote chain (used by Test 20 to verify quote_depth cap) ----
+    # 8 levels deep; walker should stop at HERALD_QUOTE_DEPTH=5.
+    # Inline all 8 entries — the syntax above (list-spread inside dict-literal)
+    # isn't valid here.
+    "4000000000000001": {
+        "id": "4000000000000001",
+        "text": "DEEP-CHAIN-1: level 1 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000001",
+        "author": {"username": "deep_author_1", "name": "Deep 1"},
+        "authorId": "4001",
+        "quotedTweet": {"id": "4000000000000002"},
+        "_raw": {"legacy": {"id_str": "4000000000000001", "conversation_id_str": "4000000000000001"}},
+    },
+    "4000000000000002": {
+        "id": "4000000000000002",
+        "text": "DEEP-CHAIN-2: level 2 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000002",
+        "author": {"username": "deep_author_2", "name": "Deep 2"},
+        "authorId": "4002",
+        "quotedTweet": {"id": "4000000000000003"},
+        "_raw": {"legacy": {"id_str": "4000000000000002", "conversation_id_str": "4000000000000002"}},
+    },
+    "4000000000000003": {
+        "id": "4000000000000003",
+        "text": "DEEP-CHAIN-3: level 3 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000003",
+        "author": {"username": "deep_author_3", "name": "Deep 3"},
+        "authorId": "4003",
+        "quotedTweet": {"id": "4000000000000004"},
+        "_raw": {"legacy": {"id_str": "4000000000000003", "conversation_id_str": "4000000000000003"}},
+    },
+    "4000000000000004": {
+        "id": "4000000000000004",
+        "text": "DEEP-CHAIN-4: level 4 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000004",
+        "author": {"username": "deep_author_4", "name": "Deep 4"},
+        "authorId": "4004",
+        "quotedTweet": {"id": "4000000000000005"},
+        "_raw": {"legacy": {"id_str": "4000000000000004", "conversation_id_str": "4000000000000004"}},
+    },
+    "4000000000000005": {
+        "id": "4000000000000005",
+        "text": "DEEP-CHAIN-5: level 5 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000005",
+        "author": {"username": "deep_author_5", "name": "Deep 5"},
+        "authorId": "4005",
+        "quotedTweet": {"id": "4000000000000006"},
+        "_raw": {"legacy": {"id_str": "4000000000000005", "conversation_id_str": "4000000000000005"}},
+    },
+    "4000000000000006": {
+        "id": "4000000000000006",
+        "text": "DEEP-CHAIN-6: level 6 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000006",
+        "author": {"username": "deep_author_6", "name": "Deep 6"},
+        "authorId": "4006",
+        "quotedTweet": {"id": "4000000000000007"},
+        "_raw": {"legacy": {"id_str": "4000000000000006", "conversation_id_str": "4000000000000006"}},
+    },
+    "4000000000000007": {
+        "id": "4000000000000007",
+        "text": "DEEP-CHAIN-7: level 7 of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000007",
+        "author": {"username": "deep_author_7", "name": "Deep 7"},
+        "authorId": "4007",
+        "quotedTweet": {"id": "4000000000000008"},
+        "_raw": {"legacy": {"id_str": "4000000000000007", "conversation_id_str": "4000000000000007"}},
+    },
+    "4000000000000008": {
+        "id": "4000000000000008",
+        "text": "DEEP-CHAIN-8: level 8 of 8 (terminal)",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": "4000000000000008",
+        "author": {"username": "deep_author_8", "name": "Deep 8"},
+        "authorId": "4008",
+        # No quotedTweet — terminal
+        "_raw": {"legacy": {"id_str": "4000000000000008", "conversation_id_str": "4000000000000008"}},
+    },
 }
 
 

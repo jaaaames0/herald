@@ -726,5 +726,218 @@ assert est_fresh["fetch_attempts"] >= 1, \
     f"fresh-cache estimate should predict >=1 fetch, got {est_fresh['fetch_attempts']}"
 print(f"  ✓ fresh-cache estimate is conservative (>=1 fetch)")
 
+# ---------- Phase 3.5.1 robustness tests (different patterns) ----------
+
+banner("Test 18: pure reply chain (A replies B replies C replies D)")
+
+conn.close()
+TEST_DB = str(TEST_DIR / f"test-phase18-{int(_t.time())}.db")
+os.environ["HERALD_DB_PATH"] = TEST_DB
+importlib.reload(herald_db)
+herald_db = importlib.reload(herald_db)
+conn = herald_db.get_connection()
+herald_db.init_schema(conn)
+
+# Top is a quote-tweet that quote-tweets A (who is a reply, but A's reply
+# parent B is also a reply, etc. — pure reply chain below A).
+pure_reply_top = {
+    "id": "3000000000000000",
+    "text": "TOP quote-tweet of a pure-reply chain",
+    "author": {"id": "3099", "username": "pure_reply_top"},
+    "metrics": {"likes": 0, "retweets": 0, "replies": 0, "quote_count": 0},
+    "conversation": {"id": "3000000000000000", "parent_id": None, "is_reply": False, "parent_tweet": None},
+    "quoted_tweet": {
+        "id": "3000000000000001",
+        "text": "PURE-REPLY-1: I'm responding to B here",
+        "author": {"username": "pure_reply_a", "name": "Reply A"},
+        "created_at": "Thu Jul 02 22:00:00 +0000 2026",
+        "metrics": {"likes": 0, "retweets": 0, "replies": 0, "quote_count": 0},
+        "conversation": {
+            "id": "3000000000000002",
+            "parent_id": "3000000000000002",
+            "is_reply": True,
+            "parent_tweet": None,
+        },
+    },
+    "media": None, "links": None,
+    "created_at": "Thu Jul 02 22:05:00 +0000 2026",
+    "lang": "en", "source": "test",
+    "post_type": "quote",
+}
+
+herald_db.upsert_post(conn, pure_reply_top)
+conn.commit()
+attempted, succeeded, failed, skipped = herald_context.enrich_batch([pure_reply_top])
+print(f"  enrich_batch: attempted={attempted} ok={succeeded} fail={failed} skip={skipped}")
+# Expected: A inline + fetch B (parent of A) + fetch C (parent of B) = 2
+# fetches. Walker stops at reply_depth=2 (B→C costs 2 reply hops total:
+# A→B is hop 1, B→C is hop 2). D should NOT be fetched (would be 3rd hop).
+assert attempted == 2, f"expected 2 fetches (A inlined, B and C fetched), got {attempted}"
+
+# Verify walk
+expected = [
+    ("3000000000000001", "inline-from-bird"),
+    ("3000000000000002", "fetched-via-reply-chain"),
+    ("3000000000000003", "fetched-via-reply-chain"),
+]
+for qid, src in expected:
+    row = conn.execute(
+        "SELECT fetch_status, fetch_error FROM quote_context WHERE quoted_tweet_id = ?",
+        (qid,),
+    ).fetchone()
+    assert row is not None, f"{qid} missing"
+    assert row["fetch_status"] == "success"
+    assert row["fetch_error"] == src, f"{qid} provenance: {row['fetch_error']} != {src}"
+print(f"  ✓ walker follows pure reply chain up to reply_depth cap (A, B, C — not D)")
+
+conn.commit()
+
+banner("Test 19: cycle protection (A ↔ B)")
+
+conn.close()
+TEST_DB = str(TEST_DIR / f"test-phase19-{int(_t.time())}.db")
+os.environ["HERALD_DB_PATH"] = TEST_DB
+importlib.reload(herald_db)
+herald_db = importlib.reload(herald_db)
+conn = herald_db.get_connection()
+herald_db.init_schema(conn)
+
+cycle_top = {
+    "id": "3100000000000000",
+    "text": "TOP of a cycle test",
+    "author": {"id": "3199", "username": "cycle_top"},
+    "metrics": {"likes": 0, "retweets": 0, "replies": 0, "quote_count": 0},
+    "conversation": {"id": "3100000000000000", "parent_id": None, "is_reply": False, "parent_tweet": None},
+    # The top quotes a non-reply tweet (the cycle) — the cycle is reached via
+    # the reply chain of the direct quote target.
+    # Actually let's simpler: top quote-tweets 3100000000000001 (cycle A),
+    # which is a reply to 3100000000000002 (cycle B), which is a reply back
+    # to 3100000000000001. Walker should detect the cycle and stop.
+    "quoted_tweet": {
+        "id": "3100000000000001",
+        "text": "CYCLE-1: A replies to B (and B replies to A)",
+        "author": {"username": "cycle_a", "name": "Cycle A"},
+        "created_at": "Thu Jul 02 20:00:00 +0000 2026",
+        "metrics": {"likes": 0, "retweets": 0, "replies": 0, "quote_count": 0},
+        "conversation": {
+            "id": "3100000000000002",
+            "parent_id": "3100000000000002",  # → B
+            "is_reply": True,
+            "parent_tweet": None,
+        },
+    },
+    "media": None, "links": None,
+    "created_at": "Thu Jul 02 20:05:00 +0000 2026",
+    "lang": "en", "source": "test",
+    "post_type": "quote",
+}
+
+herald_db.upsert_post(conn, cycle_top)
+conn.commit()
+attempted, succeeded, failed, skipped = herald_context.enrich_batch([cycle_top])
+print(f"  enrich_batch: attempted={attempted} ok={succeeded} fail={failed} skip={skipped}")
+# A inline + fetch B (A's reply parent). When walker is at B and tries to
+# recurse on B's parent (= A back), the visited set should reject it. So
+# we fetch B once, then skip the back-edge.
+assert attempted == 1, f"expected 1 fetch (A inlined, B fetched, cycle break), got {attempted}"
+# Verify A and B are in cache but no infinite fetches
+a_row = conn.execute("SELECT 1 FROM quote_context WHERE quoted_tweet_id = '3100000000000001'").fetchone()
+b_row = conn.execute("SELECT 1 FROM quote_context WHERE quoted_tweet_id = '3100000000000002'").fetchone()
+assert a_row is not None and b_row is not None, "A and B should both be cached"
+print(f"  ✓ cycle broken cleanly (A → B, then back-edge B→A rejected by visited set)")
+
+conn.commit()
+
+banner("Test 20: quote-depth cap correctly truncates deep chains")
+
+conn.close()
+TEST_DB = str(TEST_DIR / f"test-phase20-{int(_t.time())}.db")
+os.environ["HERALD_DB_PATH"] = TEST_DB
+importlib.reload(herald_db)
+herald_db = importlib.reload(herald_db)
+conn = herald_db.get_connection()
+herald_db.init_schema(conn)
+
+# Build an 8-level quote chain (deep enough to exceed HERALD_QUOTE_DEPTH=5).
+# Each level quote-tweets the next. Walker should fetch levels 2 through 5
+# (4 fetches; level 1 is inlined) and stop at depth-2 the budget / depth cap.
+# Levels 6-8 should NOT appear in cache.
+deep_chain_ids = [f"400000000000000{i}" for i in range(1, 9)]
+deep_chain_tweets = {}
+for i, qid in enumerate(deep_chain_ids):
+    is_last = (i == len(deep_chain_ids) - 1)
+    deep_chain_tweets[qid] = {
+        "id": qid,
+        "text": f"DEEP-CHAIN-{i+1}: level {i+1} of 8",
+        "createdAt": "Thu Jul 02 17:00:00 +0000 2026",
+        "conversationId": qid,
+        "author": {"username": f"deep_author_{i+1}", "name": f"Deep {i+1}"},
+        "authorId": f"4{i:03d}",
+        "quotedTweet": (None if is_last else {"id": deep_chain_ids[i + 1]}),
+        "_raw": {"legacy": {"id_str": qid, "conversation_id_str": qid}},
+    }
+
+# Top quote-tweets the first level (inlined). The inlined quoted_tweet block
+# must be in PARSED shape (snake_case keys: quoted_tweet, conversation,
+# metrics) — not raw bird shape (camelCase quotedTweet) — because the walker
+# reads `qd.get("quoted_tweet")` after loading the cached parsed tweet. Raw
+# shape would leave the walker blind to the next-level stub.
+deep_level1_inline = {
+    "id": deep_chain_ids[0],
+    "url": f"https://x.com/deep_author_1/status/{deep_chain_ids[0]}",
+    "text": "DEEP-CHAIN-1: level 1 of 8",
+    "author": {"username": "deep_author_1", "name": "Deep 1"},
+    "created_at": "Thu Jul 02 17:00:00 +0000 2026",
+    "metrics": {"likes": 0, "retweets": 0, "replies": 0, "quote_count": 0},
+    "conversation": {
+        "id": deep_chain_ids[0],
+        "parent_id": None,
+        "is_reply": False,
+        "parent_tweet": None,
+    },
+    # Stub to next level — parser-style (snake_case).
+    "quoted_tweet": {
+        "id": deep_chain_ids[1],
+        "url": f"https://x.com/_/status/{deep_chain_ids[1]}",
+        "text": None,
+        "author": None,
+    },
+    "media": None, "links": None,
+}
+
+deep_top = {
+    "id": "4099999999999999",
+    "text": "DEEP-CHAIN-TOP",
+    "author": {"id": "4099", "username": "deep_top"},
+    "metrics": {"likes": 0, "retweets": 0, "replies": 0, "quote_count": 0},
+    "conversation": {"id": "4099999999999999", "parent_id": None, "is_reply": False, "parent_tweet": None},
+    "quoted_tweet": deep_level1_inline,
+    "media": None, "links": None,
+    "created_at": "Thu Jul 02 17:05:00 +0000 2026",
+    "lang": "en", "source": "test",
+    "post_type": "quote",
+}
+
+herald_db.upsert_post(conn, deep_top)
+conn.commit()
+attempted, succeeded, failed, skipped = herald_context.enrich_batch([deep_top])
+print(f"  enrich_batch: attempted={attempted} ok={succeeded} fail={failed} skip={skipped}")
+# With HERALD_QUOTE_DEPTH=5: walker fetches depths 2, 3, 4, 5 (4 fetches,
+# then stops at depth cap before fetching 6, 7, 8).
+assert attempted == 4, f"expected 4 fetches (depth cap at HERALD_QUOTE_DEPTH=5), got {attempted}"
+# Verify levels 2..5 are cached, 6..8 are not.
+for i, qid in enumerate(deep_chain_ids, start=1):
+    row = conn.execute(
+        "SELECT fetch_status FROM quote_context WHERE quoted_tweet_id = ?",
+        (qid,),
+    ).fetchone()
+    if i <= 5:
+        assert row is not None and row["fetch_status"] == "success", \
+            f"depth-{i} ({qid}) should be cached within quote_depth cap"
+    else:
+        assert row is None, \
+            f"depth-{i} ({qid}) should NOT be cached (past quote_depth cap)"
+print(f"  ✓ walker stops cleanly at HERALD_QUOTE_DEPTH=5 (4 fetches, depth 1-5 cached; 6-8 not cached)")
+
 print("\nAll tests pass. ✓")
 conn.close()
