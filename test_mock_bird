@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Mock bird CLI: prints canned JSON for thread <id> and read <id>.
+
+Used only by /tmp/herald-test/test_parser_v2.py to exercise herald_context
+without a live Twitter session.
+
+Quote-chain fixture (used by the quote-context tests):
+  * `read 1000000000000001` → a quoted tweet whose own quotedTweet is a stub
+    pointing at 1000000000000002 (depth 2).
+  * `read 1000000000000002` → a quoted tweet whose own quotedTweet is a stub
+    pointing at 1000000000000003 (depth 3 — the chain stops here because
+    `read 1000000000000003` returns a tweet with no further quotedTweet).
+
+The parser's parse_quoted() will pick up the stub fields automatically.
+"""
+import json
+import sys
+
+THREAD_RESPONSE = [
+    {
+        "id": "2072818767164219467",
+        "text": "Pretty neat new retrospective study of GLP-1 users: tirzepatide > semaglutide.",
+        "createdAt": "Thu Jul 02 23:04:39 +0000 2026",
+        "replyCount": 7, "retweetCount": 3, "likeCount": 73,
+        "conversationId": "2072818767164219467",
+        "author": {"username": "cremieuxrecueil", "name": "Cremieux"},
+        "authorId": "1637507099558027267",
+        "media": [{"type": "photo", "url": "https://pbs.twimg.com/media/HMQg9eyXEAEtDLW.jpg"}],
+        "_raw": {
+            "legacy": {
+                "id_str": "2072818767164219467",
+                "conversation_id_str": "2072818767164219467",
+                "full_text": "Pretty neat new retrospective study of GLP-1 users",
+                "in_reply_to_status_id_str": None,
+                "in_reply_to_user_id_str": None,
+            }
+        },
+    },
+    {
+        "id": "2072818769550811275",
+        "text": "Sub-analysis: tirzepatide patients also saw HbA1c improvement.",
+        "createdAt": "Thu Jul 02 23:08:12 +0000 2026",
+        "replyCount": 2, "retweetCount": 1, "likeCount": 28,
+        "conversationId": "2072818767164219467",
+        "author": {"username": "cremieuxrecueil", "name": "Cremieux"},
+        "authorId": "1637507099558027267",
+        "_raw": {
+            "legacy": {
+                "id_str": "2072818769550811275",
+                "in_reply_to_status_id_str": "2072818767164219467",
+                "in_reply_to_user_id_str": "1637507099558027267",
+                "conversation_id_str": "2072818767164219467",
+            }
+        },
+    },
+]
+
+
+# Synthetic quote-chain fixtures. Each entry is the full parsed-shape tweet
+# (matching what `bird read <id> --json-full` would return). When a tweet
+# has its own quotedTweet, it's nested as a STUB (id + url, no text) — the
+# parser's parse_quoted() sees that stub; the recursive walker in
+# herald_context then fetches the next level via `bird read`.
+QUOTE_CHAIN = {
+    "1000000000000001": {
+        "id": "1000000000000001",
+        "text": "quote-chain depth 1 — points at depth 2",
+        "createdAt": "Thu Jul 02 23:10:00 +0000 2026",
+        "conversationId": "9999999999991",
+        "author": {"username": "depth1_author", "name": "Depth 1"},
+        "authorId": "201",
+        "quotedTweet": {
+            "id": "1000000000000002",
+            # Stub: only id is meaningful. bird --quote-depth 1 returns
+            # nested quotedTweet as id-only when it can't inline further.
+        },
+        "_raw": {
+            "legacy": {
+                "id_str": "1000000000000001",
+                "conversation_id_str": "9999999999991",
+            }
+        },
+    },
+    "1000000000000002": {
+        "id": "1000000000000002",
+        "text": "quote-chain depth 2 — points at depth 3",
+        "createdAt": "Thu Jul 02 23:11:00 +0000 2026",
+        "conversationId": "9999999999992",
+        "author": {"username": "depth2_author", "name": "Depth 2"},
+        "authorId": "202",
+        "quotedTweet": {
+            "id": "1000000000000003",
+        },
+        "_raw": {
+            "legacy": {
+                "id_str": "1000000000000002",
+                "conversation_id_str": "9999999999992",
+            }
+        },
+    },
+    "1000000000000003": {
+        "id": "1000000000000003",
+        "text": "quote-chain depth 3 — chain ends here, no nested quote",
+        "createdAt": "Thu Jul 02 23:12:00 +0000 2026",
+        "conversationId": "9999999999993",
+        "author": {"username": "depth3_author", "name": "Depth 3"},
+        "authorId": "203",
+        # No quotedTweet field — terminal node.
+        "_raw": {
+            "legacy": {
+                "id_str": "1000000000000003",
+                "conversation_id_str": "9999999999993",
+            }
+        },
+    },
+    # A 'broken' fixture: a tweet with a quotedTweet stub pointing at an id
+    # the mock doesn't know. Used to verify failed-fetch handling.
+    "1000000000000099": {
+        "id": "1000000000000099",
+        "text": "quote-chain broken — quotedTweet points at unknown id",
+        "createdAt": "Thu Jul 02 23:13:00 +0000 2026",
+        "conversationId": "9999999999999",
+        "author": {"username": "broken_author", "name": "Broken"},
+        "authorId": "299",
+        "quotedTweet": {
+            "id": "999999999999999",  # not in QUOTE_CHAIN — fetch will fail
+        },
+        "_raw": {
+            "legacy": {
+                "id_str": "1000000000000099",
+                "conversation_id_str": "9999999999999",
+            }
+        },
+    },
+}
+
+
+def read_response(tweet_id):
+    """Return a parsed-shape tweet dict for the given id.
+
+    Order of precedence:
+      1. If id starts with 'FAIL_' (failure fixture) → emit a not-found
+         error so callers can exercise the failed-fetch path.
+      2. If id is in QUOTE_CHAIN → return the fixture.
+      3. Otherwise → emit a generic stub so the parser succeeds. This keeps
+         real-world id fixtures in test_tweets.json working without
+         hand-maintaining mocks for every id.
+    """
+    s = str(tweet_id)
+    if s.startswith("FAIL_"):
+        sys.stderr.write("mock_bird: forced-failure read id: " + s + "\n")
+        sys.exit(3)
+    if s in QUOTE_CHAIN:
+        return QUOTE_CHAIN[s]
+    return {
+        "id": s,
+        "text": "[mocked read of " + s + "]",
+        "createdAt": "Thu Jul 02 23:10:00 +0000 2026",
+        "conversationId": "9999999999999",
+        "author": {"username": "mockuser", "name": "Mock User"},
+        "authorId": "111",
+        "_raw": {"legacy": {"id_str": s}},
+    }
+
+
+args = sys.argv[1:]
+if args and args[0] == "thread":
+    sys.stdout.write(json.dumps(THREAD_RESPONSE))
+    sys.exit(0)
+elif args and args[0] == "read":
+    sys.stdout.write(json.dumps(read_response(args[1] if len(args) > 1 else "0")))
+    sys.exit(0)
+else:
+    sys.stderr.write("mock_bird: unknown command " + repr(args) + "\n")
+    sys.exit(2)

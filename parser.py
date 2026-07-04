@@ -113,12 +113,17 @@ def parse_conversation(tweet):
 
 def parse_quoted(quoted):
     """Extract lean quoted_tweet block if present. Pulls the long-form note_tweet
-    text from the quoted tweet's _raw if available (parity with parse_tweet)."""
+    text from the quoted tweet's _raw if available (parity with parse_tweet).
+
+    When the underlying tweet has its own quotedTweet (a deeper level in the
+    quote-tweet chain), recurse as a STUB (id + url, no text). Bird only inlines
+    one level via --quote-depth 1; deeper levels are id-only in the JSON.
+    herald_context.enrich_batch then chases the chain via bird read."""
     if not quoted:
         return None
     qauthor = quoted.get("author", {}) or {}
     quoted_text = get_tweet_text(quoted)
-    return {
+    block = {
         "id":         quoted.get("id", ""),
         "url":        f"https://x.com/{qauthor.get('username','')}/status/{quoted.get('id','')}",
         "text":       quoted_text,
@@ -134,6 +139,18 @@ def parse_quoted(quoted):
             "quote_count": quoted.get("quoteCount", 0) or 0,
         },
     }
+    # Recurse one level for nested quotes — stub at this level (text=None)
+    # so herald_context knows there's a deeper level to fetch.
+    nested = quoted.get("quotedTweet")
+    if nested:
+        inner_id = nested.get("id", "")
+        block["quoted_tweet"] = {
+            "id":   inner_id,
+            "url":  f"https://x.com/_/status/{inner_id}",
+            "text": None,
+            "author": None,
+        }
+    return block
 
 
 def parse_media(tweet, legacy):
