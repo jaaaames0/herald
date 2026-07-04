@@ -132,6 +132,118 @@ QUOTE_CHAIN = {
             }
         },
     },
+    # ---- Reply-parent fixtures (Phase 3.5.1: quote-of-reply-of-quote chains) ----
+    # Pattern: A (quote-tweet) → B (REPLY with parent C, also quote-tweets D)
+    #          C (QUOTE-ORIG, quote-tweets D) → D (REPLY with parent E, quote-tweets F)
+    #          E (QUOTE-ORIG, quote-tweets F) → F (QUOTE-ORIG, quote-tweets G)
+    #          G (ORIG — the source).
+    # This is the shape of James's tweet 2073288532110557675 chain.
+
+    # B: a reply (parent C), quote-tweets nothing
+    "2000000000000002": {
+        "id": "2000000000000002",
+        "text": "REPLY-1: @author_c one of the most bizarre experiences...",
+        "createdAt": "Thu Jul 02 23:10:00 +0000 2026",
+        "conversationId": "2000000000000003",  # in C's conversation
+        "inReplyToStatusId": "2000000000000003",  # parent is C
+        "author": {"username": "reply_author_b", "name": "Reply B"},
+        "authorId": "2020",
+        # No quotedTweet field — B doesn't quote-tweet anyone.
+        "_raw": {
+            "legacy": {
+                "id_str": "2000000000000002",
+                "in_reply_to_status_id_str": "2000000000000003",
+                "conversation_id_str": "2000000000000003",
+            }
+        },
+    },
+    # C: a quote-orig, quote-tweets D
+    "2000000000000003": {
+        "id": "2000000000000003",
+        "text": "QUOTE-ORIG-1: replies and quotes are absolutely bonkers wtaf",
+        "createdAt": "Thu Jul 02 23:09:00 +0000 2026",
+        "conversationId": "2000000000000003",
+        "author": {"username": "author_c", "name": "Author C"},
+        "authorId": "2030",
+        "quotedTweet": {
+            "id": "2000000000000004",  # stub: C quote-tweets D
+        },
+        "_raw": {
+            "legacy": {
+                "id_str": "2000000000000003",
+                "conversation_id_str": "2000000000000003",
+            }
+        },
+    },
+    # D: a reply (parent E), quote-tweets nothing
+    "2000000000000004": {
+        "id": "2000000000000004",
+        "text": "REPLY-2: @author_e From only the stated facts, it seems plausible that...",
+        "createdAt": "Thu Jul 02 23:08:00 +0000 2026",
+        "conversationId": "2000000000000005",  # in E's conversation
+        "inReplyToStatusId": "2000000000000005",  # parent is E
+        "author": {"username": "reply_author_d", "name": "Reply D"},
+        "authorId": "2040",
+        "_raw": {
+            "legacy": {
+                "id_str": "2000000000000004",
+                "in_reply_to_status_id_str": "2000000000000005",
+                "conversation_id_str": "2000000000000005",
+            }
+        },
+    },
+    # E: a quote-orig, quote-tweets F
+    "2000000000000005": {
+        "id": "2000000000000005",
+        "text": "QUOTE-ORIG-2: Here's a simple fact about the situation...",
+        "createdAt": "Thu Jul 02 23:07:00 +0000 2026",
+        "conversationId": "2000000000000005",
+        "author": {"username": "author_e", "name": "Author E"},
+        "authorId": "2050",
+        "quotedTweet": {
+            "id": "2000000000000006",
+        },
+        "_raw": {
+            "legacy": {
+                "id_str": "2000000000000005",
+                "conversation_id_str": "2000000000000005",
+            }
+        },
+    },
+    # F: a quote-orig, quote-tweets G
+    "2000000000000006": {
+        "id": "2000000000000006",
+        "text": "QUOTE-ORIG-3: This video sounds compelling. It also skips...",
+        "createdAt": "Thu Jul 02 23:06:00 +0000 2026",
+        "conversationId": "2000000000000006",
+        "author": {"username": "author_f", "name": "Author F"},
+        "authorId": "2060",
+        "quotedTweet": {
+            "id": "2000000000000007",  # the source!
+        },
+        "_raw": {
+            "legacy": {
+                "id_str": "2000000000000006",
+                "conversation_id_str": "2000000000000006",
+            }
+        },
+    },
+    # G: the original source
+    "2000000000000007": {
+        "id": "2000000000000007",
+        "text": "SOURCE: David Pocock pauses, overcome with emotion...",
+        "createdAt": "Thu Jul 02 23:05:00 +0000 2026",
+        "conversationId": "2000000000000007",
+        "author": {"username": "author_g", "name": "Author G"},
+        "authorId": "2070",
+        # No quotedTweet — terminal node
+        "_raw": {
+            "legacy": {
+                "id_str": "2000000000000007",
+                "conversation_id_str": "2000000000000007",
+            }
+        },
+    },
 }
 
 

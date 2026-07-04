@@ -1,7 +1,6 @@
 # Herald — Roadmap
 
-Phases are ordered by current plan. Phase 0/1 are done; Phase 2 is partially
-done; Phase 3 is the next active item.
+Phases are ordered by current plan. Phase 0/1/2/3/3.5/3.5.1 are done.
 
 | Phase | Status | What |
 |---|---|---|
@@ -9,7 +8,8 @@ done; Phase 3 is the next active item.
 | 1 — Automation + Web UI | ✅ DONE | systemd timers, gunicorn, nginx, cert |
 | 2 — Synthesis sophistication | 🟡 PARTIAL | embeddings ✅, two-stage ✅, continuity pending, ranker tuning pending, per-story prompts pending |
 | 3 — Parser v2 | ✅ DONE (2026-07-04) | parent tweets of replies + thread expansion + recursive quote chains |
-| 3.5 — Inline-quote fix + recursive quote chains | ✅ DONE (2026-07-04) | seed quote_context at ingest; chain walker to HERALD_QUOTE_DEPTH (default 3) |
+| 3.5 — Inline-quote fix | ✅ DONE (2026-07-04) | seed quote_context at ingest; chain walker to HERALD_QUOTE_DEPTH (default 3) |
+| 3.5.1 — Quote+reply unravel | ✅ DONE (2026-07-04) | walk both quote AND reply dimensions; reply-parent fetch per quote target; HERALD_REPLY_PARENT_DEPTH=2, HERALD_FOLLOW_REPLY_PARENTS toggle |
 | 4 — Multi-source | ⏭ PLANNED | RSS collector first, then news API |
 | 5 — Accumulation-based publishing | ⏭ DEFERRED | depends on Phase 4 (multi-source) |
 | 6 — Deep dives / context gathering | ⏭ STRETCH | for low-context / technical stories |
@@ -76,6 +76,57 @@ the cache was empty for inlined quotes).
   later if both get a "retry policy" rework.
 - No depth cap on the thread fetch (some 30+ tweet threads may token-cost
   a lot). Same as before, still open.
+
+---
+
+## Phase 3.5.1 — Quote+reply unravel ✅ DONE (2026-07-04)
+
+**Goal:** Unravel chains that interleave quote and reply dimensions
+(e.g. "Big if true" → reply → quote of reply → reply → quote → quote → source).
+Phase 3.5 followed only the quote dimension; reply-targeting quote chains
+were truncated at the first reply boundary.
+
+**What shipped:**
+
+- `parser.parse_quoted` now propagates `conversation` metadata for the
+  quoted tweet (id, parent_id, is_reply). Without this, the walker
+  couldn't tell the quoted tweet was a reply.
+- `herald_context._expand_context_chain` (renamed from `_expand_quote_chain`)
+  walks both quote and reply dimensions orthogonally. At each quote target
+  reached, if it's itself a reply, also fetch the parent and recurse on
+  ITS quote chain. Quote depth and reply depth decrement independently.
+- `attach_context_to_candidates` emits `_quote_context` as a list of
+  `{"tweet": ..., "_chain_kind": "quote"|"reply"}` items. Synthesise prompt
+  renders quote levels with `↳` and reply-parent edges with `⤴`.
+- `herald_context.estimate_context_cost` — new helper for the future
+  admin panel: counts fetches and approximate context tokens for a batch.
+- `HERALD_FOLLOW_REPLY_PARENTS` env toggle (default True) — master kill
+  switch for reply-chain walking. Set to 0 to revert to Phase 3.5
+  behaviour (quote-only).
+
+**Verified on James's tweet 2073288532110557675** (the "Big if true" / Hamas
+chain — 7 tweets spanning 4 quote hops + 2 reply hops):
+
+```
+Before 3.5.1: 1 context item (just @KelseyTuoc's reply — chain invisible)
+After  3.5.1: 6 context items with full quote+reply structure:
+  • @KelseyTuoc (quote-tweet of Andrew)
+  ⤴ @Andrew_Semenza (Kelsey's reply parent)
+  ↳ @KelseyTuoc (Andrew's quote target, also a reply)
+  ⤴ @davidhazony (Kelsey's other reply parent)
+  ↳ @OsherFeldman (davidhazony's quote target)
+  ↳ @strangerous10 (OsherFeldman's quote target — THE SOURCE)
+```
+
+**Cost:** 5 fetches per chain worst case. With HERALD_CONTEXT_MAX_FETCHES=30
+shared budget, ~4 such chains per collect before trim.
+
+**Tunables:**
+- `HERALD_QUOTE_DEPTH` (default 5, was 3)
+- `HERALD_REPLY_PARENT_DEPTH` (default 2)
+- `HERALD_FOLLOW_REPLY_PARENTS` (default 1)
+
+**Tests:** 5 new cases (13–17). All pass.
 
 ---
 

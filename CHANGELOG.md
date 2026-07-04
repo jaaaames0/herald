@@ -4,6 +4,87 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 
 ---
 
+## 2026-07-04 — Phase 3.5.1: recursive quote+reply chain unraveling
+
+Builds on Phase 3.5. The previous version followed only the QUOTE dimension.
+When a quote target was itself a reply (very common on X — people quote-tweet
+other replies constantly), we'd walk the reply target's quotedTweet chain but
+skip the reply target's reply parent. For chains that interleave quotes and
+replies (e.g. "Big if true" → reply → quote of reply → reply → quote → quote →
+source), we'd miss most of the chain.
+
+Example: tweet 2073288532110557675 ("Big if true" by @xwanyex) is a 7-tweet
+chain alternating quote and reply dimensions. Before 3.5.1, the LLM saw only
+ONE tweet (the immediate quote target). After 3.5.1, the LLM sees all 7.
+
+Three pieces:
+
+- **`parser.parse_quoted` propagates `conversation` metadata for the quoted
+  tweet** (`id`, `parent_id`, `is_reply`). Bird exposes `inReplyToStatusId`
+  and `conversationId` on the inline JSON, but the parser was dropping them.
+  Without this, the walker doesn't know the quoted tweet is a reply.
+- **`herald_context._expand_context_chain`** now walks both quote and reply
+  dimensions orthogonally. At each quote target reached via the chain, if
+  the fetched tweet is itself a reply, also fetch its reply parent (and
+  recurse on its quote chain). Quote depth and reply depth decrement
+  independently — neither dimension blocks the other.
+- **`herald_context.attach_context_to_candidates`** now emits
+  `_quote_context` as a list of `{"tweet": ..., "_chain_kind": "quote"|"reply"}`
+  items, ordered by DFS traversal. The synthesise prompt renders quote
+  chain levels with `↳` and reply-parent edges with `⤴` so the LLM can
+  tell the two dimensions apart in tangled chains.
+
+**New env knobs:**
+- `HERALD_QUOTE_DEPTH` (default bumped 3 → **5**) — quote chain depth per chain
+- `HERALD_REPLY_PARENT_DEPTH` (default **2**) — reply chain depth per quote target
+- `HERALD_FOLLOW_REPLY_PARENTS` (default **True**) — master toggle for reply chain
+
+**Cost profile (per chain):**
+- 1 quote + 0 reply (common): 0 fetches (inline suffices)
+- 4 quotes + 0 reply: 3 fetches
+- 4 quotes + 2 reply (James's pattern): 5 fetches
+- Worst case (5 quote + 2 reply): 7 fetches per chain
+- With `HERALD_CONTEXT_MAX_FETCHES=30`: ~4 such chains per collect before
+  the budget starts trimming the deepest fetches
+
+**Provenance in `quote_context.fetch_error`:**
+- `inline-from-bird` — depth-1 seeded by parser at ingest (unchanged)
+- `fetched-via-quote-chain` — fetched because something quote-tweeted this
+- `fetched-via-reply-chain` — fetched because something replied to this
+
+**Cost estimator (`herald_context.estimate_context_cost`)**: new helper
+that walks the cache (or inline data) and returns:
+- `quote_posts`: candidates with quote chains
+- `fetch_attempts`: how many bird reads would happen (capped at budget)
+- `context_tweets_attached`: total context items
+- `approx_input_tokens`: rough context token estimate (~120 per item)
+
+For the future admin panel — just call this with parsed_posts and display
+the numbers. Useful for "with these settings, how much will this batch
+cost?" and for tuning `HERALD_QUOTE_DEPTH` vs `HERALD_REPLY_PARENT_DEPTH`.
+
+**Tests:** `test_parser_v2.py` extended from 12 to 17 cases:
+- 13: enrich_batch unravels the full quote-of-reply-of-quote chain
+- 14: attach_context emits interleaved quote/reply chain with kinds
+- 15: rendering shows `⤴` for reply edges and `↳` for quote depth
+- 16: `HERALD_FOLLOW_REPLY_PARENTS=0` collapses reply chain (toggle works)
+- 17: `estimate_context_cost` returns sensible numbers (with-cache and fresh)
+
+All pass. `test_mock_bird` extended with quote-of-reply fixtures
+(`2000000000000001`–`2000000000000007`) and `FAIL_*` id prefix for
+forced-failure paths.
+
+**Live verification:** ingested tweet `2073288532110557675` on optiplex:
+- Before 3.5.1: LLM sees only the inline quote target (1 tweet)
+- After 3.5.1: LLM sees all 7 tweets, including the source @strangerous10
+  tweet ("David Pocock pauses..."), with `↳` and `⤴` markers showing the
+  quote/reply structure
+
+**Files touched:** `parser.py`, `herald_context.py`, `herald_synthesise.py`,
+`test_mock_bird`, `test_parser_v2.py`.
+
+---
+
 ## 2026-07-04 — Phase 3.5: quote-context fix + recursive quote chains
 
 Found a quiet bug while reviewing the quote-tweet path: the parser's
@@ -70,8 +151,6 @@ Fix is in three pieces, with a recursive quote-chain walker on top:
 `schema.sql` (comment-only), `ROADMAP.md`.
 
 ---
-
-
 
 ## 2026-07-03 — Doc split
 - Split `docs/project/projects/planned/herald.md` (656 lines / ~50KB) into
@@ -311,3 +390,82 @@ proportional to the moving parts it adds?"
 - Working name selected: **Herald**.
 - Herald = "a medieval emissary or town crier; one who reads the news
   aloud"
+## 2026-07-04 — Phase 3.5.1: recursive quote+reply chain unraveling
+
+Builds on Phase 3.5. The previous version followed only the QUOTE dimension.
+When a quote target was itself a reply (very common on X — people quote-tweet
+other replies constantly), we'd walk the reply target's quotedTweet chain but
+skip the reply target's reply parent. For chains that interleave quotes and
+replies (e.g. "Big if true" → reply → quote of reply → reply → quote → quote →
+source), we'd miss most of the chain.
+
+Example: tweet 2073288532110557675 ("Big if true" by @xwanyex) is a 7-tweet
+chain alternating quote and reply dimensions. Before 3.5.1, the LLM saw only
+ONE tweet (the immediate quote target). After 3.5.1, the LLM sees all 7.
+
+Three pieces:
+
+- **`parser.parse_quoted` propagates `conversation` metadata for the quoted
+  tweet** (`id`, `parent_id`, `is_reply`). Bird exposes `inReplyToStatusId`
+  and `conversationId` on the inline JSON, but the parser was dropping them.
+  Without this, the walker doesn't know the quoted tweet is a reply.
+- **`herald_context._expand_context_chain`** now walks both quote and reply
+  dimensions orthogonally. At each quote target reached via the chain, if
+  the fetched tweet is itself a reply, also fetch its reply parent (and
+  recurse on its quote chain). Quote depth and reply depth decrement
+  independently — neither dimension blocks the other.
+- **`herald_context.attach_context_to_candidates`** now emits
+  `_quote_context` as a list of `{"tweet": ..., "_chain_kind": "quote"|"reply"}`
+  items, ordered by DFS traversal. The synthesise prompt renders quote
+  chain levels with `↳` and reply-parent edges with `⤴` so the LLM can
+  tell the two dimensions apart in tangled chains.
+
+**New env knobs:**
+- `HERALD_QUOTE_DEPTH` (default bumped 3 → **5**) — quote chain depth per chain
+- `HERALD_REPLY_PARENT_DEPTH` (default **2**) — reply chain depth per quote target
+- `HERALD_FOLLOW_REPLY_PARENTS` (default **True**) — master toggle for reply chain
+
+**Cost profile (per chain):**
+- 1 quote + 0 reply (common): 0 fetches (inline suffices)
+- 4 quotes + 0 reply: 3 fetches
+- 4 quotes + 2 reply (James's pattern): 5 fetches
+- Worst case (5 quote + 2 reply): 7 fetches per chain
+- With `HERALD_CONTEXT_MAX_FETCHES=30`: ~4 such chains per collect before
+  the budget starts trimming the deepest fetches
+
+**Provenance in `quote_context.fetch_error`:**
+- `inline-from-bird` — depth-1 seeded by parser at ingest (unchanged)
+- `fetched-via-quote-chain` — fetched because something quote-tweeted this
+- `fetched-via-reply-chain` — fetched because something replied to this
+
+**Cost estimator (`herald_context.estimate_context_cost`)**: new helper
+that walks the cache (or inline data) and returns:
+- `quote_posts`: candidates with quote chains
+- `fetch_attempts`: how many bird reads would happen (capped at budget)
+- `context_tweets_attached`: total context items
+- `approx_input_tokens`: rough context token estimate (~120 per item)
+
+For the future admin panel — just call this with parsed_posts and display
+the numbers. Useful for "with these settings, how much will this batch
+cost?" and for tuning `HERALD_QUOTE_DEPTH` vs `HERALD_REPLY_PARENT_DEPTH`.
+
+**Tests:** `test_parser_v2.py` extended from 12 to 17 cases:
+- 13: enrich_batch unravels the full quote-of-reply-of-quote chain
+- 14: attach_context emits interleaved quote/reply chain with kinds
+- 15: rendering shows `⤴` for reply edges and `↳` for quote depth
+- 16: `HERALD_FOLLOW_REPLY_PARENTS=0` collapses reply chain (toggle works)
+- 17: `estimate_context_cost` returns sensible numbers (with-cache and fresh)
+
+All pass. `test_mock_bird` extended with quote-of-reply fixtures
+(`2000000000000001`–`2000000000000007`) and `FAIL_*` id prefix for
+forced-failure paths.
+
+**Live verification:** ingested tweet `2073288532110557675` on optiplex:
+- Before 3.5.1: LLM sees only the inline quote target (1 tweet)
+- After 3.5.1: LLM sees all 7 tweets, including the source @strangerous10
+  tweet ("David Pocock pauses..."), with `↳` and `⤴` markers showing the
+  quote/reply structure
+
+**Files touched:** `parser.py`, `herald_context.py`, `herald_synthesise.py`,
+`test_mock_bird`, `test_parser_v2.py`.
+

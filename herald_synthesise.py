@@ -53,10 +53,12 @@ def _render_context_block(context_posts, max_chars=600):
     post to id/author/text/has-media/link-hints so context posts don't drown
     out the candidates in token cost.
 
-    Items in `context_posts` may carry a `_depth` integer (0 = top-level /
-    direct thread member or depth-1 quote parent; 1 = one level nested in
-    a quote chain; etc.). Nested levels are indented with ↳ markers so the
-    LLM sees the chain structure when synthesising context-rich stories.
+    Items in `context_posts` may carry:
+      - `_depth` int: 0 = top-level (thread member or depth-1 quote target of
+        our post); 1+ = nested in some chain. Indented with `↳`.
+      - `_chain_kind` str: 'quote' or 'reply'. Quote chain items use `↳`,
+        reply chain items use `⤴` so the LLM can tell the two dimensions
+        apart in tangled chains (quote-of-reply-of-quote patterns).
 
     Returns: (block_text, n_posts)  or  ("", 0) when no context.
     """
@@ -64,10 +66,14 @@ def _render_context_block(context_posts, max_chars=600):
         return "", 0
     lines = [f"CONTEXT POSTS ({len(context_posts)} parsed; each shows "
              f"id, author, text — cite with [post:ID] when a claim is grounded by them; "
-             f"↳ prefix marks levels nested inside a quote-tweet chain):"]
+             f"↳ marks quote-tweet depth, ⤴ marks reply-parent edges):"]
     for cp in context_posts:
         depth = cp.get("_depth", 0) or 0
-        if depth > 0:
+        kind = cp.get("_chain_kind", "quote")
+        if kind == "reply":
+            marker = "⤴"
+            indent = "  "
+        elif depth > 0:
             marker = "↳"
             indent = "  " + "  " * (depth - 1)
         else:
@@ -92,11 +98,18 @@ def _gather_context_for(posts):
     Posts here are candidate posts (already have _thread_context /
     _quote_context attached by herald_context.attach_context_to_candidates).
 
-    _quote_context may be a single dict (legacy) or a list of dicts ordered
-    shallowest-to-deepest (recursive quote chains). Each emitted item gets
-    a `_depth` attribute so the rendered block can indent nested levels.
+    _quote_context may be:
+      - a single dict (legacy format from before Phase 3.5) — treated as a
+        one-element chain with _chain_kind='quote'
+      - a list of {"tweet": parsed_dict, "_chain_kind": "quote"|"reply"}
+        dicts, ordered by traversal (DFS through both quote and reply dims)
 
-    Dedup by post id (quoted targets may overlap with thread members).
+    Each emitted item gets `_depth` (0 for top-level, incremented on each
+    quote hop) and `_chain_kind` (preserved from the input) so the rendered
+    block can distinguish nested quote levels from reply edges.
+
+    Dedup by post id (quoted targets may overlap with thread members; reply
+    parents may overlap with quote targets).
     """
     seen = set()
     out = []
@@ -108,25 +121,40 @@ def _gather_context_for(posts):
             if not tpid or tpid == cand_id or tpid in seen:
                 continue
             seen.add(tpid)
-            # Don't mutate the cached thread tweet; copy + tag with depth.
             tagged = dict(tp)
             tagged["_depth"] = 0
+            tagged["_chain_kind"] = "thread"
             out.append(tagged)
-        # _quote_context: support both list (chain) and legacy single-dict.
         qc = p.get("_quote_context")
         if qc is None:
             continue
-        if isinstance(qc, list):
-            chain = qc
+        # Normalise to a list of {"tweet": ..., "_chain_kind": ...} items.
+        if isinstance(qc, dict):
+            chain_items = [{"tweet": qc, "_chain_kind": "quote"}]
+        elif isinstance(qc, list):
+            if qc and isinstance(qc[0], dict) and "tweet" in qc[0]:
+                # New format: list of {"tweet": ..., "_chain_kind": ...}
+                chain_items = qc
+            else:
+                # Legacy format: list of parsed tweet dicts
+                chain_items = [{"tweet": t, "_chain_kind": "quote"} for t in qc]
         else:
-            chain = [qc]
-        for depth, qc_item in enumerate(chain):
-            qid = qc_item.get("id")
+            continue
+        quote_depth = 0
+        for item in chain_items:
+            kind = item.get("_chain_kind", "quote")
+            tweet = item.get("tweet", {})
+            qid = tweet.get("id")
             if not qid or qid == cand_id or qid in seen:
                 continue
             seen.add(qid)
-            tagged = dict(qc_item)
-            tagged["_depth"] = depth
+            tagged = dict(tweet)
+            tagged["_chain_kind"] = kind
+            if kind == "quote":
+                tagged["_depth"] = quote_depth
+                quote_depth += 1
+            else:
+                tagged["_depth"] = 0  # reply parents sit at their own depth
             out.append(tagged)
     return out
 

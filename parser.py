@@ -115,6 +115,11 @@ def parse_quoted(quoted):
     """Extract lean quoted_tweet block if present. Pulls the long-form note_tweet
     text from the quoted tweet's _raw if available (parity with parse_tweet).
 
+    Includes the quoted tweet's `conversation` block (is_reply, parent_id,
+    conversation_id) so herald_context's reply-parent walker knows whether
+    to fetch the quoted tweet's own reply parent — this is what lets us
+    unravel quote-of-reply-of-quote chains.
+
     When the underlying tweet has its own quotedTweet (a deeper level in the
     quote-tweet chain), recurse as a STUB (id + url, no text). Bird only inlines
     one level via --quote-depth 1; deeper levels are id-only in the JSON.
@@ -123,6 +128,10 @@ def parse_quoted(quoted):
         return None
     qauthor = quoted.get("author", {}) or {}
     quoted_text = get_tweet_text(quoted)
+    # Mirror parse_conversation for the quoted tweet. Bird exposes both
+    # `inReplyToStatusId` and `conversationId` on the inline JSON.
+    q_parent_id = quoted.get("inReplyToStatusId") or None
+    q_conv_id = quoted.get("conversationId", "") or ""
     block = {
         "id":         quoted.get("id", ""),
         "url":        f"https://x.com/{qauthor.get('username','')}/status/{quoted.get('id','')}",
@@ -137,6 +146,12 @@ def parse_quoted(quoted):
             "retweets":    quoted.get("retweetCount", 0) or 0,
             "replies":     quoted.get("replyCount", 0) or 0,
             "quote_count": quoted.get("quoteCount", 0) or 0,
+        },
+        "conversation": {
+            "id":           q_conv_id,
+            "parent_id":    q_parent_id,
+            "is_reply":     bool(q_parent_id),
+            "parent_tweet": None,
         },
     }
     # Recurse one level for nested quotes — stub at this level (text=None)
