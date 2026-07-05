@@ -373,3 +373,161 @@ Trigger: when we hit our third "I want to tune X without ssh+restart"
 moment. Currently we've had two (the synthesis temperature, the
 embedding threshold). One more and it's worth doing.
 
+
+---
+
+## Phase 3.6 — Image + link context expansion ⏭ NEXT (in two sub-phases)
+
+**Goal:** Herald synthesises with awareness of the actual content of
+attached media and outbound links, not just the post text. Image and link
+context are sourced from the post itself (inbound), not external
+research (which is Phase 6 lane).
+
+Split into two sub-phases so each can ship, test, and roll back
+independently.
+
+### Phase 3.6.1 — Image context 🔨 STARTING
+
+**What:** Fetch a 1-2 sentence description of each attached photo via a
+vision LLM (OpenRouter), cache by URL, render in stage 2 prompt as a
+compact IMAGE CONTEXT block.
+
+**Skip videos.** Capturing meaningful video content needs ffmpeg-style
+extraction; cost too high for value, James call. Twitter video media
+entries ignored.
+
+**Architecture (mirrors Phase 3.5):**
+- New table image_context (mirrors quote_context shape: media_url PK,
+  fetched_at, fetch_status, fetch_error, description, model).
+- New module herald_media.py:
+  - fetch_image_description(url, model) — one OpenRouter vision call.
+    URLs are pbs.twimg.com (public, no auth) so HTTP image_url content
+    type works without download+base64.
+  - enrich_media_batch(posts, max_fetches) — collect-time eager fetch,
+    iterates photo-type media across parsed posts, skips URLs already in
+    cache, budget-capped.
+  - attach_media_context(posts) — digest-time lookup, sets
+    p[image_description] for each post that has photo media.
+- Extend _call() in herald_synthesise.py to accept multi-part content
+  arrays (text + image_url). Falls back to text-only when no image_url.
+- New _render_image_context_block(image_descs, max_chars=200) — compact
+  one-liner per image: [media_id] author: description.
+
+**Per-story cap:** HERALD_IMAGES_PER_STORY (default 1). When multiple
+posts in a story cluster have images, pick the highest-engagement one
+or first chronologically — TBD during implementation. Configurable via
+admin dashboard once Phase 3.6 ships.
+
+**Cost:** Default vision model GPT-4o-mini via OpenRouter, ~$0.00015
+per low-res image. Budget: HERALD_MAX_MEDIA_FETCHES_PER_CYCLE=10.
+
+**Test plan:**
+- TestImageContext_CacheHit: second attach on same URL skips refetch
+- TestImageContext_ImagePerStoryCap: multi-image cluster renders ≤1
+- TestImageContext_VideosIgnored: mtype=video skipped silently
+- TestImageContext_FailureHandling: 404/network failure recorded as
+  failed row, does not abort batch
+- TestImageContext_PromptRendering: IMAGE CONTEXT block format
+
+**Exit:** A digest story about a post with an attached chart shows
+what the chart actually says (e.g. "bar chart: US incarceration rate
+vs other countries, US ~5x next-highest"). Not a description of the
+post text.
+
+### Phase 3.6.2 — Link context ⏭ AFTER 3.6.1
+
+**What:** Fetch and clean the raw article body for every outbound link
+in the candidate set, render in stage 2 prompt as a LINK CONTEXT block.
+
+**No LLM in the middle** (James call: "AI summary of an AI summary"
+loses grounding). Pipeline: HTTP GET → HTML → readability-style article
+extraction (kill nav/footer/scripts/ads) → JSON-escape plain text →
+ship as-is to the synthesiser. LLM sees raw article content, not a
+summary.
+
+**Skips Open Graph tags** — publisher-curated summaries are a form of
+editorial filtering. We want the actual article body.
+
+**Same architecture as 3.6.1** (link_context table, enrich_link_batch,
+attach_link_context, _render_link_context_block).
+
+
+
+---
+
+## Phase 3.6 — Image + link context expansion ⏭ NEXT (in two sub-phases)
+
+**Goal:** Herald synthesises with awareness of the actual content of
+attached media and outbound links, not just the post text. Image and link
+context are sourced from the post itself (inbound), not external
+research (which is Phase 6 lane).
+
+Split into two sub-phases so each can ship, test, and roll back
+independently.
+
+### Phase 3.6.1 — Image context 🔨 STARTING
+
+**What:** Fetch a 1-2 sentence description of each attached photo via a
+vision LLM (OpenRouter), cache by URL, render in stage 2 prompt as a
+compact IMAGE CONTEXT block.
+
+**Skip videos.** Capturing meaningful video content needs ffmpeg-style
+extraction; cost too high for value, James call. Twitter video media
+entries ignored.
+
+**Architecture (mirrors Phase 3.5):**
+
+- New table image_context (mirrors quote_context shape: media_url PK,
+  fetched_at, fetch_status, fetch_error, description, model).
+- New module herald_media.py:
+  - fetch_image_description(url, model) — one OpenRouter vision call.
+    URLs are pbs.twimg.com (public, no auth) so HTTP image_url content
+    type works without download+base64.
+  - enrich_media_batch(posts, max_fetches) — collect-time eager fetch,
+    iterates photo-type media across parsed posts, skips URLs already in
+    cache, budget-capped.
+  - attach_media_context(posts) — digest-time lookup, sets
+    p[image_description] for each post that has photo media.
+- Extend _call() in herald_synthesise.py to accept multi-part content
+  arrays (text + image_url). Falls back to text-only when no image_url.
+- New _render_image_context_block(image_descs, max_chars=200) — compact
+  one-liner per image: [media_id] author: description.
+
+**Per-story cap:** HERALD_IMAGES_PER_STORY (default 1). When multiple
+posts in a story cluster have images, pick the highest-engagement one
+or first chronologically — TBD during implementation. Configurable via
+admin dashboard once Phase 3.6 ships.
+
+**Cost:** Default vision model GPT-4o-mini via OpenRouter, ~$0.00015
+per low-res image. Budget: HERALD_MAX_MEDIA_FETCHES_PER_CYCLE=10.
+
+**Test plan:**
+
+- TestImageContext_CacheHit: second attach on same URL skips refetch
+- TestImageContext_ImagePerStoryCap: multi-image cluster renders <=1
+- TestImageContext_VideosIgnored: mtype=video skipped silently
+- TestImageContext_FailureHandling: 404/network failure recorded as
+  failed row, does not abort batch
+- TestImageContext_PromptRendering: IMAGE CONTEXT block format
+
+**Exit:** A digest story about a post with an attached chart shows
+what the chart actually says (e.g. "bar chart: US incarceration rate
+vs other countries, US ~5x next-highest"). Not a description of the
+post text.
+
+### Phase 3.6.2 — Link context ⏭ AFTER 3.6.1
+
+**What:** Fetch and clean the raw article body for every outbound link
+in the candidate set, render in stage 2 prompt as a LINK CONTEXT block.
+
+**No LLM in the middle** (James call: "AI summary of an AI summary"
+loses grounding). Pipeline: HTTP GET → HTML → readability-style article
+extraction (kill nav/footer/scripts/ads) -> JSON-escape plain text ->
+ship as-is to the synthesiser. LLM sees raw article content, not a
+summary.
+
+**Skips Open Graph tags** — publisher-curated summaries are a form of
+editorial filtering. We want the actual article body.
+
+**Same architecture as 3.6.1** (link_context table, enrich_link_batch,
+attach_link_context, _render_link_context_block).
