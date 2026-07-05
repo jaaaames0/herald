@@ -87,6 +87,17 @@ print(f"  photos={photos}")
 print(f"  skipped={skipped}")
 print(f"  ✓ video + animated_gif filtered out, photo passes")
 
+# Also test the media_urls DB column shape (parser uses 'media', DB / 
+# get_posts_in_window uses 'media_urls' — both must work).
+post_with_db_key = {"media_urls": [
+    {"type": "photo", "url": "https://pbs.twimg.com/media/DB.jpg"},
+    {"type": "video", "url": "https://v.mp4"},
+]}
+photos_db, skip_db = herald_media._extract_photo_urls(post_with_db_key)
+assert photos_db == ["https://pbs.twimg.com/media/DB.jpg"], f"got {photos_db}"
+assert len(skip_db) == 1
+print(f"  ✓ 'media_urls' (DB shape) handled equivalently")
+
 
 # ============================================================
 # Test 2 — enrich_media_batch happy path writes success row to image_context

@@ -135,8 +135,11 @@ def fetch_image_description(url, model=None):
 
 
 def _extract_photo_urls(post):
-    """Return photo-type media URLs from a parsed post's `media` list.
+    """Return photo-type media URLs from a post.
 
+    Accepts both keys for the media list:
+      - 'media'   — parser output (list of {type, url, ...})
+      - 'media_urls' — DB column / get_posts_in_window output (same list, same shape)
     Skips 'video' entries (per James, 2026-07-05: futile to glean from
     thumbnails, too expensive to extract frames). GIFs: parser sets
     type='animated_gif' for Twitter GIFs; treat those as videos too (same
@@ -144,7 +147,7 @@ def _extract_photo_urls(post):
     Skipped entries will be marked in the candidate via _image_skipped
     for debugging but don't produce context blocks.
     """
-    media = post.get("media") or []
+    media = post.get("media") or post.get("media_urls") or []
     photos = []
     skipped = []
     for m in media:
