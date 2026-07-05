@@ -488,3 +488,37 @@ Three more test cases for the recursive walker. All pass.
   reads the parsed form after loading from cache.
 
 `test_parser_v2.py` is now 20 tests, all green.
+
+## 2026-07-05 — Phase 3.6.1: image context expansion
+
+Shipped vision-LLM context for photo media attached to posts. Video and
+GIF media skipped (per James, futile to glean from thumbnails, too
+expensive to extract frames).
+
+**What's new:**
+
+- `image_context` cache table mirrors `quote_context`: one row per media
+  URL, with `description` from the vision LLM and the `model` that
+  produced it. Stable URLs (pbs.twimg.com is content-addressable) so
+  descriptions are fetched once per image, ever.
+- `herald_media.py` module: `fetch_image_description`, `enrich_media_batch`
+  (collect-time eager, budgeted via `HERALD_MAX_MEDIA_FETCHES_PER_CYCLE`,
+  default 10), `attach_media_context` (digest-time lookup).
+- IMAGE CONTEXT block in stage 2 prompt: one line per image, prefix
+  `🖼`, cite with `[post:ID]`. Capped at `HERALD_IMAGES_PER_STORY=1`
+  default; engagement-priority picker so the highest-liked post's image
+  wins when a cluster has multiple.
+- Default vision model `openai/gpt-4o-mini` via OpenRouter (override
+  via `HERALD_VISION_MODEL`). Roughly $0.00015 per low-res image.
+- pbs.twimg.com URLs go straight in as `image_url` content — no
+  download/base64 needed (OpenRouter accepts https URLs directly).
+
+**Tests:** 8 new in `test_image_context.py`. Total 28/28 across both
+suites (8 image + 20 existing parser v2).
+
+**Files touched:** `schema.sql`, `herald_db.py`, `herald_synthesise.py`,
+`herald_digest.py` (collect + digest wiring). New: `herald_media.py`,
+`test_image_context.py`.
+
+**What's next:** Phase 3.6.2 (link context) — raw-text article scraping,
+no LLM in the middle, no Open Graph tags. Separate pass.
