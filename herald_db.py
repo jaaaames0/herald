@@ -454,3 +454,76 @@ def get_digest_summary(conn, digest_id):
         sd["posts"] = [dict(p) for p in sps]
         out["stories"].append(sd)
     return out
+
+# ---------- image_context cache (Phase 3.6.1) ----------
+
+def upsert_image_context(conn, media_url, status, description=None, error=None, model=None):
+    """Insert or update an image_context row keyed by media_url.
+
+    Status must be 'success', 'failed', or 'skipped'. Description is the
+    vision model's caption; only set when status='success'. Error message
+    is stored in fetch_error when status='failed'. Model records which
+    vision model produced the description (None if failed/skipped).
+
+    ON CONFLICT DO UPDATE so re-ingest or vision-model upgrade overwrites
+    previous rows cleanly. Description is only written when status='success'
+    so we don't accidentally clear a good description with a later 'failed'
+    attempt (callers should not store 'failed' for an already-described URL).
+    """
+    import time as _t
+    now_ts = int(_t.time())
+    conn.execute(
+        """
+        INSERT INTO image_context (
+            media_url, fetched_at, fetch_status, fetch_error, description, model
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(media_url) DO UPDATE SET
+            fetched_at   = excluded.fetched_at,
+            fetch_status = excluded.fetch_status,
+            fetch_error  = excluded.fetch_error,
+            description  = CASE WHEN excluded.fetch_status = 'success'
+                                 THEN excluded.description
+                                 ELSE image_context.description END,
+            model        = CASE WHEN excluded.fetch_status = 'success'
+                                 THEN excluded.model
+                                 ELSE image_context.model END
+        """,
+        (media_url, now_ts, status, error, description, model),
+    )
+
+
+def get_image_descriptions(conn, media_urls):
+    """Look up descriptions for a list of media URLs in one query.
+
+    Returns: dict[media_url -> {"description": str, "fetch_status": str,
+                                  "model": str|None, "fetched_at": int}].
+    Missing URLs are simply not in the returned dict.
+    """
+    if not media_urls:
+        return {}
+    placeholders = ",".join("?" for _ in media_urls)
+    rows = conn.execute(
+        f"""
+        SELECT media_url, fetch_status, fetch_error, description, model, fetched_at
+        FROM image_context
+        WHERE media_url IN ({placeholders})
+        """,
+        tuple(media_urls),
+    ).fetchall()
+    out = {}
+    for r in rows:
+        d = dict(r)
+        out[d.pop("media_url")] = d
+    return out
+
+
+def get_image_context_stats(conn):
+    """Return counts of image_context rows by status. Useful for /debug."""
+    rows = conn.execute(
+        """
+        SELECT fetch_status, COUNT(*) AS n
+        FROM image_context
+        GROUP BY fetch_status
+        """
+    ).fetchall()
+    return {r["fetch_status"]: r["n"] for r in rows}

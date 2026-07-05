@@ -352,7 +352,20 @@ Context posts: an optional CONTEXT POSTS block may follow the POSTS. These are r
 or quote targets fetched via bird thread/read so the writer can see the conversation a reply
 sits within, or what a quote-tweet is quote-tweeting. Cite context posts with the same
 [post:ID] convention when a claim is grounded by them.
+
+Image context (Phase 3.6.1): an optional IMAGE CONTEXT block may follow the CONTEXT POSTS.
+Each line describes one attached photo in 1-2 sentences, produced by a vision model from
+the actual image bytes. Treat these as grounded facts (the LLM did not invent them) and
+cite with [post:ID] when a claim relies on what's visible in the image. Per-story cap is
+configurable via HERALD_IMAGES_PER_STORY (default 1). Videos and GIFs are intentionally
+skipped — animated content needs frame extraction for useful synthesis, deferred.
 """
+
+
+# Per-story cap on images rendered as context. James decided 2026-07-05 to
+# start at 1 image per story. Bumping this is the next "I want more context"
+# lever after Phase 3.6.1 ships; will become an admin-dashboard slider.
+HERALD_IMAGES_PER_STORY = int(os.environ.get("HERALD_IMAGES_PER_STORY", "1"))
 
 
 def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None,
@@ -396,12 +409,21 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
     context_posts = _gather_context_for(theme_posts)
     context_block, _ = _render_context_block(context_posts)
 
+    # Phase 3.6.1: pick up to HERALD_IMAGES_PER_STORY images from posts in
+    # this theme that have _image_description set (set by
+    # herald_media.attach_media_context). Selection is engagement-priority
+    # so the most-liked/reposted post's image wins when a cluster has many.
+    picked_images = _pick_images_for_story(theme_posts, HERALD_IMAGES_PER_STORY)
+    image_block, n_imgs = _render_image_context_block(picked_images)
+
     user_parts = [
         f"THEME: {theme_label}{angle_line}{context_line}",
         f"POSTS ({len(posts_serialised)}):\n{json.dumps(posts_serialised, ensure_ascii=False)}",
     ]
     if context_block:
         user_parts.append(context_block)
+    if image_block:
+        user_parts.append(image_block)
     user_parts.append("Write the story JSON now.")
     user = "\n\n".join(user_parts)
     messages = [{"role": "system", "content": STAGE2_SYSTEM}, {"role": "user", "content": user}]
@@ -431,3 +453,63 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
     obj["cost_usd"] = float(usage.get("cost") or 0.0)
     obj["finish_reason"] = finish_reason
     return obj, usage, model_used, finish_reason
+
+# ---------- image context rendering (Phase 3.6.1) ----------
+
+def _pick_images_for_story(theme_posts, max_images):
+    """Pick up to `max_images` photos from a story's theme posts.
+
+    Selection rule (deterministic, no LLM):
+      1. Posts in the theme cluster that have _image_description set.
+      2. Within each, prefer highest engagement (likes + retweets*3) as a
+         proxy for "the post people engaged with most".
+      3. Tie-break by earlier appearance in theme_posts (stable order).
+
+    Returns list of (post_id, author, description) tuples, ordered.
+
+    If max_images=0 (HERALD_IMAGES_PER_STORY=0 disables image context),
+    returns []. If max_images=1 (default), at most one image renders per
+    story — per James, 2026-07-05.
+    """
+    if max_images <= 0:
+        return []
+    eligible = []
+    for p in theme_posts:
+        desc = p.get("_image_description")
+        if not desc:
+            continue
+        m = p.get("metrics") or {}
+        likes = int(m.get("likes") or m.get("like_count") or 0)
+        rts = int(m.get("retweets") or m.get("retweet_count") or 0)
+        score = likes + rts * 3
+        eligible.append((score, p))
+    # Sort by score desc, then index in theme_posts (stable).
+    eligible.sort(key=lambda x: (-x[0],))
+    out = []
+    for _, p in eligible[:max_images]:
+        author = (p.get("author") or {}).get("username", "unknown")
+        out.append((p.get("id"), author, p["_image_description"]))
+    return out
+
+
+def _render_image_context_block(picked_images, max_chars=400):
+    """Render the IMAGE CONTEXT block for the stage 2 prompt.
+
+    Format mirrors _render_context_block — one line per image, prefixed
+    so the LLM clearly distinguishes image-derived facts from quote-derived
+    facts. We don't show the URL itself (the LLM doesn't need it; the
+    description carries the meaning).
+
+    Returns: (block_text, n_images) or ("", 0) when none.
+    """
+    if not picked_images:
+        return "", 0
+    lines = [
+        f"IMAGE CONTEXT ({len(picked_images)} parsed; each shows an attached "
+        f"photo's description in 1-2 sentences. Cite with [post:ID] when the "
+        f"description grounds a factual claim. Image-only — do not invent):"
+    ]
+    for pid, author, desc in picked_images:
+        text = (desc or "").replace("\n", " ")[:max_chars]
+        lines.append(f"  🖼  [post:{pid}] @{author}: {text}")
+    return "\n".join(lines), len(picked_images)
