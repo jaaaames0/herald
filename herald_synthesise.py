@@ -353,12 +353,15 @@ or quote targets fetched via bird thread/read so the writer can see the conversa
 sits within, or what a quote-tweet is quote-tweeting. Cite context posts with the same
 [post:ID] convention when a claim is grounded by them.
 
-Image context (Phase 3.6.1): an optional IMAGE CONTEXT block may follow the CONTEXT POSTS.
-Each line describes one attached photo in 1-2 sentences, produced by a vision model from
-the actual image bytes. Treat these as grounded facts (the LLM did not invent them) and
-cite with [post:ID] when a claim relies on what's visible in the image. Per-story cap is
-configurable via HERALD_IMAGES_PER_STORY (default 1). Videos and GIFs are intentionally
-skipped — animated content needs frame extraction for useful synthesis, deferred.
+Image context (Phase 3.6.1): an IMAGE CONTEXT block follows the CONTEXT POSTS whenever the
+cluster's posts include photos. Each line describes one attached photo in 1-2 sentences,
+produced by a vision model that read the actual image bytes — so the descriptions are
+grounded facts (specific chart values, headline text visible in the screenshot, what's
+depicted in a meme, etc.). Use them as PRIMARY evidence in the story: when the post text
+is short or vague (e.g. "Goddamn Patriot 🇺🇸" + a photo), the IMAGE CONTEXT block carries
+the actual subject. Cite with [post:ID] when a claim relies on what's visible in the image,
+the same way you'd cite a quote from CONTEXT POSTS. Per-story cap is configurable via
+HERALD_IMAGES_PER_STORY (default 1). Videos and GIFs are intentionally skipped.
 """
 
 
@@ -505,9 +508,12 @@ def _render_image_context_block(picked_images, max_chars=400):
     if not picked_images:
         return "", 0
     lines = [
-        f"IMAGE CONTEXT ({len(picked_images)} parsed; each shows an attached "
-        f"photo's description in 1-2 sentences. Cite with [post:ID] when the "
-        f"description grounds a factual claim. Image-only — do not invent):"
+        f"IMAGE CONTEXT ({len(picked_images)} parsed; each shows a vision-model "
+        f"description of one attached photo. These are GROUNDED FACTS — the "
+        f"vision model read the actual image bytes, so specific chart values, "
+        f"headline text visible in a screenshot, and what's depicted in a meme "
+        f"are accurate. Use as PRIMARY evidence when the post text is short or "
+        f"vague. Cite with [post:ID]):"
     ]
     for pid, author, desc in picked_images:
         text = (desc or "").replace("\n", " ")[:max_chars]

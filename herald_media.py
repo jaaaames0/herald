@@ -40,10 +40,16 @@ import herald_db
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Default vision model. gpt-4o-mini via OpenRouter is the cheapest reliable
-# vision-capable model at the moment; ~$0.00015 per low-res image input.
-# Override per-deployment via HERALD_VISION_MODEL.
-DEFAULT_VISION_MODEL = os.environ.get("HERALD_VISION_MODEL", "openai/gpt-4o-mini")
+# Default vision model. Gemini 2.5 Flash via OpenRouter is the current
+# sweet spot for image captioning on this workload as of 2026-07-05:
+# - reads text in images (headlines, captions, chart labels) — huge for
+#   political/news content where most posts are screenshots
+# - multimodal-native, not a text model with image bolted on
+# - per-image cost is essentially free ($3e-7/image)
+# - ~$0.3/M input + $2.5/M output tokens
+# Earlier default was openai/gpt-4o-mini (released July 2024); superseded
+# by the GPT-5 / Gemini 2.5 generations. Override via HERALD_VISION_MODEL.
+DEFAULT_VISION_MODEL = os.environ.get("HERALD_VISION_MODEL", "google/gemini-2.5-flash")
 
 # Per-cycle budget for fresh image-context fetches. Collect runs every
 # 30min peak / 2h off-peak; we want at most ~10 fresh descriptions per
