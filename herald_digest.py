@@ -12,7 +12,7 @@ Pass --live (when implemented) to call OpenRouter for real.
 Examples:
   herald_digest.py collect                       # pull + parse + ingest
   herald_digest.py digest --since "12h ago"      # synthesise (dry-run)
-  herald_digest.py digest --since "12h ago" --top 5 --show
+  herald_digest.py digest --since "12h ago" --top 7 --show
 """
 import argparse
 import json
@@ -21,7 +21,6 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import herald_db
@@ -44,11 +43,16 @@ DEFAULT_MODEL = os.environ.get("HERALD_MODEL", "openai/gpt-oss-120b")
 # for a 12h window of X; tweak via CLI flags or env.
 DEFAULT_MAX_CANDIDATES = int(os.environ.get("HERALD_MAX_CANDIDATES", "40"))
 
+# Phase 3.8: cap on items (single-post picks from stage 1). Items ride in
+# addition to stories, capped independently. The editor already chose the
+# count, but this stops a runaway model from flooding the digest.
+MAX_ITEMS_PER_DIGEST = int(os.environ.get("HERALD_MAX_ITEMS_PER_DIGEST", "10"))
+
 
 # ---------- collect subcommand ----------
 
 def cmd_collect(args):
-    """Chain: bird home → herald_collect.py → herald_parser.py → herald_ingest.py
+    """Chain: bird home → collect.py → parser.py → herald_ingest.py
 
     Pipeline order (added 2026-07-03 for parser v2):
       1. bird home (raw feed)
@@ -141,6 +145,20 @@ def cmd_collect(args):
                     )
             except Exception as e:
                 print(f"[collect] WARN: herald_media.enrich_media_batch failed: {e}", file=sys.stderr)
+
+            # Phase 3.6.2: eager fetch of article bodies for outbound links.
+            # Same pattern as media: best-effort, never blocks ingest.
+            try:
+                import herald_links
+                lnk_attempted, lnk_ok, lnk_fail, lnk_skip = herald_links.enrich_link_batch(parsed_posts)
+                if lnk_attempted or lnk_fail or lnk_skip:
+                    print(
+                        f"[collect] links: attempted={lnk_attempted} "
+                        f"ok={lnk_ok} failed={lnk_fail} skipped={lnk_skip}",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(f"[collect] WARN: herald_links.enrich_link_batch failed: {e}", file=sys.stderr)
         else:
             print("[collect] context: 0 parsed posts; nothing to enrich", file=sys.stderr)
     except Exception as e:
@@ -245,6 +263,7 @@ def cmd_digest(args):
         n_with_thread = 0
         n_with_quote  = 0
         n_with_image  = 0
+        n_with_link   = 0
         try:
             import herald_context
             herald_context.attach_context_to_candidates(candidates)
@@ -278,6 +297,24 @@ def cmd_digest(args):
                 )
         except Exception as e:
             print(f"[digest] WARN: herald_media.attach_media_context failed: {e}", file=sys.stderr)
+
+        # Phase 3.6.2: attach link-context entries (lookups into link_context
+        # DB; article bodies were fetched earlier during collect). Per-story
+        # cap (HERALD_LINKS_PER_STORY, default 2) is applied later in stage
+        # 2 prompt assembly.
+        try:
+            import herald_links
+            herald_links.attach_link_context(candidates)
+            for c in candidates:
+                if c.get("_link_context"):
+                    n_with_link += 1
+            if n_with_link:
+                print(
+                    f"[digest] link context: {n_with_link} candidates with link extractions",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"[digest] WARN: herald_links.attach_link_context failed: {e}", file=sys.stderr)
 
         # 3. Stage 1: timeline map
         print(f"[digest] stage 1: timeline map...", file=sys.stderr)
@@ -326,21 +363,12 @@ def cmd_digest(args):
             stories_to_write = []
 
         # Build a lookup from theme label to its contributing posts.
-        # Strategy: a theme "owns" a post if the post_id appears in
-        # zeitgeist[label].post_ids OR debate_lines[...].post_ids OR
-        # signal_vs_noise.noise_patterns[...].post_ids. Falls back to all
-        # candidates if we can't map cleanly.
+        # A theme "owns" a post if the post_id appears in
+        # zeitgeist[label].post_ids. Falls back to all candidates if
+        # we can't map cleanly. (Phase 3.7.1 dropped debate_lines +
+        # signal_vs_noise from the stage-1 output; every post that
+        # lands in a zeitgeist theme is fair game.)
         zeitgeist = (timeline_map or {}).get("zeitgeist") or []
-        debate_lines = (timeline_map or {}).get("debate_lines") or []
-        s_vs_n = (timeline_map or {}).get("signal_vs_noise") or {}
-        noise_pids = set()
-        for pat in (s_vs_n.get("noise_patterns") or []):
-            if isinstance(pat, dict):
-                for pid in pat.get("post_ids") or []:
-                    noise_pids.add(pid)
-            elif isinstance(pat, str):
-                # ignore string descriptions; we need post_ids for mapping
-                pass
 
         theme_to_posts: dict = {}
         for th in zeitgeist:
@@ -390,7 +418,9 @@ def cmd_digest(args):
                 continue
             angle_str = angle if isinstance(angle, str) else None
             story, s2_usage, s2_model, s2_finish = herald_synthesise.stage2_story(
-                label, theme_posts, angle=angle_str, timeline_map_summary=None, dry_run=dry_run,
+                label, theme_posts, angle=angle_str, timeline_map_summary=None,
+                editor_notes=(timeline_map or {}).get("editor_notes") or None,
+                dry_run=dry_run,
             )
             story["post_ids"] = [p["id"] for p in theme_posts]
             story["post_count"] = len(theme_posts)
@@ -404,6 +434,56 @@ def cmd_digest(args):
             total_s2_cost += float(s2_usage.get("cost") or 0.0)
             total_s2_in += int(s2_usage.get("prompt_tokens") or 0)
             total_s2_out += int(s2_usage.get("completion_tokens") or 0)
+
+        # Phase 3.8.3: items loop. Each item from stage 1 is a single-post pick
+        # that didn't form a theme. Treated as a 1-post cluster; stage 2's
+        # sliding-scale prompt produces a short caption or passes the tweet
+        # through. Items become regular stories rows — same schema, same UI,
+        # same row shape. theme_label carries the item's `kind` so it's
+        # queryable but doesn't introduce a new enum.
+        items = (timeline_map or {}).get("items") or []
+        if not isinstance(items, list):
+            items = []
+        items = items[:MAX_ITEMS_PER_DIGEST]
+        if items:
+            print(f"[digest] stage 2: writing {len(items)} items...", file=sys.stderr)
+        for j, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            item_pid = item.get("post_id")
+            why = item.get("why") or ""
+            kind = item.get("kind") or "item"
+            if not item_pid:
+                continue
+            item_post = pid_to_post.get(item_pid)
+            if not item_post:
+                # Item cited a post outside the candidate set — skip silently
+                # rather than fail the digest. Common case: stage 1 referenced
+                # a context post.
+                continue
+            # Stage 2: sliding scale with n_sources=1 → 1-2 sentences or pass-through
+            item_story, i2_usage, i2_model, i2_finish = herald_synthesise.stage2_story(
+                f"[{kind}] {item_post.get('text','')[:80]}",  # theme_label = kind + tweet snippet
+                [item_post],
+                angle=why,                              # the editor's `why` becomes the angle
+                timeline_map_summary=None,
+                editor_notes=(timeline_map or {}).get("editor_notes") or None,
+                dry_run=dry_run,
+            )
+            item_story["post_ids"] = [item_post["id"]]
+            item_story["post_count"] = 1
+            m = item_post.get("metrics") or {}
+            item_story["total_score"] = float(
+                (m.get("likes") or 0) + 2 * (m.get("retweets") or 0) + (m.get("replies") or 0)
+            )
+            # theme_label carries the item's kind so it's still a regular row
+            # but queryable by kind. No separate `coverage_type` enum — items
+            # are first-class stories, just shorter.
+            item_story["theme_label"] = kind
+            stories.append(item_story)
+            total_s2_cost += float(i2_usage.get("cost") or 0.0)
+            total_s2_in += int(i2_usage.get("prompt_tokens") or 0)
+            total_s2_out += int(i2_usage.get("completion_tokens") or 0)
 
         print(
             f"[digest] stage 2 done: {len(stories)} stories, "
@@ -427,8 +507,6 @@ def cmd_digest(args):
             sources=["x"],
             model_versions=model_versions,
             zeitgeist=zeitgeist,
-            debate_lines=debate_lines,
-            signal_vs_noise=s_vs_n,
             timeline_map=timeline_map,
             input_post_ids=input_post_ids,
             window_hours=window_hours,
@@ -468,7 +546,7 @@ def cmd_digest(args):
             extra = ""
             if not dry_run:
                 extra = f"  [in={s.get('prompt_tokens',0)} out={s.get('completion_tokens',0)} ${s.get('cost_usd',0):.6f}]"
-            print(f"  {i}. [{s.get('theme_label','?')}] {s['headline']}{extra}", file=sys.stderr)
+            print(f"  {i}. [{s.get('theme_label','?')}] {s.get('headline') or '<no headline>'}{extra}", file=sys.stderr)
 
         if skipped:
             print(f"[digest] ({skipped} stories skipped: no posts mapped to theme)", file=sys.stderr)
@@ -484,7 +562,7 @@ def cmd_digest(args):
                         except (json.JSONDecodeError, TypeError):
                             st[f] = []
             # Also include the timeline-map metadata fields
-            for f in ("zeitgeist", "debate_lines", "signal_vs_noise", "input_post_ids"):
+            for f in ("zeitgeist", "input_post_ids"):
                 v = summary.get(f)
                 if isinstance(v, str):
                     try:
@@ -521,7 +599,7 @@ def main():
 
     p_digest = subparsers.add_parser("digest", help="Synthesise a digest from DB posts")
     p_digest.add_argument("--since", default="12h ago", help="Time window, e.g. '12h ago' / '30m ago' / '1d ago' (default: 12h ago)")
-    p_digest.add_argument("--top", type=int, default=5, help="Max stories to write in stage 2 (default: 5)")
+    p_digest.add_argument("--top", type=int, default=7, help="Max stories to write in stage 2 (default: 7, raised from 5 in Phase 3.7.1)")
     p_digest.add_argument("--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES, help="Max posts to pre-filter and send to stage 1 LLM (default: 40)")
     p_digest.add_argument("--dry-run", action="store_true", help="Skip LLM calls; use placeholder synthesis (no cost)")
     p_digest.add_argument("--show", action="store_true", help="Print full digest JSON to stdout")

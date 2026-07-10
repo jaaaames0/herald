@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}debug — herald{% endblock %}
+{% block content %}
+
+<div class="cover">
+  <h1>debug</h1>
+  <div class="cover-meta">
+    <span>last 30 pipeline runs</span>
+    <span>db: /var/lib/herald/herald.db</span>
+  </div>
+</div>
+
+<div class="status-banner">
+  <div class="status-item">
+    <span class="label">last digest</span>
+    <span class="value">
+      {% if last_digest %}#{{ last_digest.id }} &middot; {{ ago(last_digest.generated_at) }} &middot; {{ last_digest.story_count }} stor{{ 'y' if last_digest.story_count == 1 else 'ies' }}{% else %}none{% endif %}
+    </span>
+  </div>
+  <div class="status-item">
+    <span class="label">last collect</span>
+    <span class="value">
+      {% if last_collect %}{{ ago(last_collect.finished_at or last_collect.started_at) }} &middot; {{ last_collect.status }}{% if last_collect.rows_out %} &middot; {{ last_collect.rows_out }} post{{ '' if last_collect.rows_out == 1 else 's' }}{% endif %}{% else %}none{% endif %}
+    </span>
+  </div>
+</div>
+
+{% if runs %}
+<table class="runs-table">
+  <thead>
+    <tr>
+      <th>id</th>
+      <th>step</th>
+      <th>started</th>
+      <th>duration</th>
+      <th>status</th>
+      <th>rows</th>
+      <th>tokens (in/out)</th>
+      <th>cost</th>
+      <th>model</th>
+      <th>error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td>{{ r.id }}</td>
+      <td class="step">{{ r.step }}</td>
+      <td class="ts">{{ r.started_str }}</td>
+      <td class="ts">{{ r.duration_str }}</td>
+      <td class="status-{{ r.status }}">{{ r.status }}</td>
+      <td>{{ (r.rows_in or '—') }}/{{ (r.rows_out or '—') }}</td>
+      <td class="ts">{{ r.tokens_str or '—' }}</td>
+      <td class="ts">{{ r.cost_str or '—' }}</td>
+      <td class="ts">{{ r.model or '—' }}</td>
+      <td class="err">{{ r.error or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  <h3>no pipeline runs yet</h3>
+</div>
+{% endif %}
+
+{% endblock %}

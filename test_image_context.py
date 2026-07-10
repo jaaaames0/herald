@@ -38,7 +38,7 @@ import herald_synthesise
 
 
 def make_parsed_post(external_id, media, text="x", metrics=None):
-    """Build a minimal parsed-post dict shaped like what herald_parser emits."""
+    """Build a minimal parsed-post dict shaped like what parser.py emits."""
     return {
         "id": external_id,
         "external_id": external_id,

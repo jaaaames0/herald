@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}digest #{{ d.id }} — herald{% endblock %}
+{% block content %}
+
+<div class="cover">
+  <h1>digest #{{ d.id }}</h1>
+  <div class="cover-meta">
+    <span><strong>window</strong> {{ d.period_start_str }} → {{ d.period_end_str }}{% if d.window_hours %} ({{ '%g'|format(d.window_hours) }}h){% endif %}</span>
+    <span><strong>generated</strong> {{ d.generated_str }}</span>
+    <span><strong>stories</strong> {{ d.stories|length }}</span>
+    {% if d.input_post_ids %}<span><strong>candidates</strong> {{ d.input_post_ids|length }} post{{ '' if d.input_post_ids|length == 1 else 's' }}</span>{% endif %}
+  </div>
+  {% if d.model_versions %}
+  <div class="cover-meta" style="margin-top: 0.4rem;">
+    {% for mv in d.model_versions %}<span><strong>model</strong> {{ mv }}</span>{% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{# ─── ZEITGEIST ─── #}
+{% if d.zeitgeist %}
+<div class="section">
+  <span class="section-label">zeitgeist &middot; what’s moving in the timeline</span>
+  <div class="themes">
+    {% for th in d.zeitgeist %}
+    {% set sal = th.salience if th.salience else 'low' %}
+    <div class="theme">
+      <div class="theme-label">
+        <span class="theme-mark {% if sal == 'low' %}low{% endif %}">{{ salience_mark(sal) }}</span>
+        <span>{{ th.label }}</span>
+        <span class="theme-accounts">&middot; {{ sal }} salience</span>
+      </div>
+      <div class="theme-desc">{{ th.description or '' }}</div>
+      {% if th.accounts %}
+      <div class="theme-accounts">
+        accounts:
+        {% for a in th.accounts %}<span class="acc">@{{ a }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
+      </div>
+      {% endif %}
+      {% if th.why_it_matters %}
+      <div class="theme-accounts" style="margin-top: 0.25rem;">{{ th.why_it_matters }}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ─── STORIES ─── #}
+<div class="section">
+  <span class="section-label">stories</span>
+  <div class="stories">
+    {% for s in d.stories %}
+    {# Phase 3.8: items are single-post picks from the editor's `items` list.
+       They render inline with stories but with lighter visual weight. The
+       `post_count == 1` check catches both kinds of single-post entries;
+       theme_label-based fallback covers multi-post items if we ever add them. #}
+    {% set is_item = (s.post_count == 1) or (s.theme_label and s.theme_label in ['news','humor','quote','meme','off-beat','link','sidebar','observation','thread-anchor','item','political']) %}
+    <article class="story {% if is_item %}story-item{% endif %}">
+      <div class="story-head">
+        <span class="story-num">{% if not is_item %}{{ loop.index }}.{% endif %}</span>
+        <span class="story-headline">{{ s.headline }}</span>
+        {% if s.topic %}<span class="story-topic">{{ s.topic }}</span>{% endif %}
+      </div>
+      {% if s.angle %}
+      <div class="story-angle">{{ s.angle }}</div>
+      {% endif %}
+      <div class="story-body">{{ s.story_html|safe }}</div>
+
+      {% if s.posts %}
+      <div class="sources">
+        <div class="sources-label">sources ({{ s.posts|length }})</div>
+        {% for lp in s.posts %}
+        <div class="source">
+          <div class="source-head">
+            <span class="source-author">@{{ lp.author_handle or '?' }}</span>
+            <span class="source-time">{{ lp.created_str }}</span>
+            <a class="source-id" href="https://x.com/i/web/status/{{ lp.external_id }}" target="_blank" rel="noopener">[{{ lp.external_id[:10] }}…]</a>
+          </div>
+          <span class="source-text">{{ lp.text }}</span>
+          {% if lp.metrics_str %}<div class="source-metrics">{{ lp.metrics_str }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if s.key_quotes %}
+      <div class="key-quotes">
+        <div class="sources-label">key quotes</div>
+        {% for kq in s.key_quotes %}
+        {% if kq is mapping %}
+        <div class="key-quote">
+          “{{ kq.quote or '' }}”
+          <span class="key-quote-speaker">— @{{ kq.speaker or '?' }}{% if kq.post_id %} · <a href="https://x.com/i/web/status/{{ kq.post_id }}" target="_blank" rel="noopener" style="color: var(--muted);">{{ kq.post_id[:10] }}…</a>{% endif %}</span>
+        </div>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</div>
+
+<p style="margin-top: 3rem; color: var(--muted); font-size: 0.72rem;">
+  <a href="{{ url_for('index') }}">← all digests</a>
+</p>
+
+{% endblock %}

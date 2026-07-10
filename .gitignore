@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+venv/
 
 # Herald runtime artefacts
 *.db
@@ -16,6 +17,10 @@ __pycache__/
 /collect.log
 /parse.log
 /ingest.log
+
+# One-off investigations (kept on disk for reference, not part of the
+# codebase). Add new ones here rather than committing.
+quality_runs/
 
 # Local config / secrets — never commit
 .env

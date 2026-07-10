@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS stories (
   updated_at INTEGER,
   post_count INTEGER,
   total_score REAL,
-  cluster_method TEXT,                     -- 'shared_link', 'embedding', etc.
+  cluster_method TEXT,                     -- 'embedding' (current); reserved for future methods
   -- Per-story token / cost tracking (added 2026-06-28 for OpenRouter baseline).
   prompt_tokens INTEGER,                   -- input tokens for this story's LLM call
   completion_tokens INTEGER,               -- output tokens (incl. reasoning_tokens if any)
@@ -209,3 +209,19 @@ CREATE TABLE IF NOT EXISTS image_context (
 );
 
 CREATE INDEX IF NOT EXISTS idx_image_context_status ON image_context(fetch_status);
+
+-- Link context cache (Phase 3.6.2, added 2026-07-06).
+-- Mirrors image_context structure: one row per canonical outbound URL
+-- (tracking-stripped, lowercased host). Canonical URL is the PK so
+-- duplicate links across many posts collapse to one row. No LLM involved.
+CREATE TABLE IF NOT EXISTS link_context (
+  canonical_url TEXT PRIMARY KEY,
+  fetched_at    INTEGER NOT NULL,
+  fetch_status  TEXT NOT NULL,        -- 'success' | 'failed'
+  fetch_error   TEXT,                 -- error message if status='failed'
+  content_text  TEXT,                 -- extracted article body, ≤8000 chars
+  content_chars INTEGER,              -- len(content_text); denormalised for stats
+  content_bytes INTEGER               -- len(body_bytes); diagnostics only
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_context_status ON link_context(fetch_status);

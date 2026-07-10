@@ -280,17 +280,19 @@ def get_posts_in_window(conn, since_ts, until_ts, source="x"):
 
 def upsert_digest_with_stories(conn, period_start, period_end, stories,
                                sources=None, model_versions=None,
-                               zeitgeist=None, debate_lines=None,
-                               signal_vs_noise=None, timeline_map=None,
-                               input_post_ids=None, window_hours=None):
+                               zeitgeist=None, timeline_map=None,
+                               input_post_ids=None, window_hours=None,
+                               default_source="x"):
     """Write a digest row + all its stories + story_posts links in one transaction.
 
     stories: list of dicts each with: headline, story, topic, post_ids, post_count,
              total_score, plus optional key_quotes, media_references, cluster_method,
              theme_label, angle, prompt_tokens, completion_tokens, cost_usd.
 
-    Two-stage digest metadata (zeitgeist/debate_lines/signal_vs_noise/timeline_map)
-    is JSON-encoded and written to the digest row for the UI to render alongside stories.
+    Two-stage digest metadata (zeitgeist + timeline_map) is JSON-encoded and written
+    to the digest row for the UI to render alongside stories. (Phase 3.7.1 dropped
+    debate_lines + signal_vs_noise; their DB columns remain for backward compat
+    with old digests but are no longer written.)
 
     Returns the digest_id.
     """
@@ -315,8 +317,8 @@ def upsert_digest_with_stories(conn, period_start, period_end, stories,
         json.dumps(sources),
         json.dumps(model_versions),
         json.dumps(zeitgeist) if zeitgeist is not None else None,
-        json.dumps(debate_lines) if debate_lines is not None else None,
-        json.dumps(signal_vs_noise) if signal_vs_noise is not None else None,
+        None,  # debate_lines — removed in Phase 3.7.1; column kept for back-compat
+        None,  # signal_vs_noise — removed in Phase 3.7.1; column kept for back-compat
         json.dumps(timeline_map) if timeline_map is not None else None,
         json.dumps(input_post_ids) if input_post_ids is not None else None,
         window_hours,
@@ -346,7 +348,7 @@ def upsert_digest_with_stories(conn, period_start, period_end, stories,
             now, now,
             s.get("post_count", 0),
             s.get("total_score", 0.0),
-            s.get("cluster_method", "shared_link"),
+            s.get("cluster_method", "embedding"),
             s.get("prompt_tokens"),
             s.get("completion_tokens"),
             s.get("cost_usd"),
@@ -359,8 +361,8 @@ def upsert_digest_with_stories(conn, period_start, period_end, stories,
         # Link posts to this story
         for post_id in s.get("post_ids", []):
             pid_row = conn.execute(
-                "SELECT id FROM posts WHERE source = 'x' AND external_id = ?",
-                (post_id,),
+                "SELECT id FROM posts WHERE source = ? AND external_id = ?",
+                (default_source, post_id),
             ).fetchone()
             if pid_row is None:
                 continue
@@ -523,6 +525,84 @@ def get_image_context_stats(conn):
         """
         SELECT fetch_status, COUNT(*) AS n
         FROM image_context
+        GROUP BY fetch_status
+        """
+    ).fetchall()
+    return {r["fetch_status"]: r["n"] for r in rows}
+
+
+# ---------- link_context cache (Phase 3.6.2) ----------
+
+def upsert_link_context(conn, canonical_url, status, content_text=None, error=None, content_bytes=None):
+    """Insert or update a link_context row keyed by canonical_url.
+
+    Status must be 'success' or 'failed'. content_text is the extracted
+    article body and is only persisted when status='success'. Error message
+    is stored in fetch_error when status='failed'. content_bytes records
+    the original HTTP body size (diagnostic) regardless of status.
+
+    ON CONFLICT DO UPDATE so re-fetching overwrites cleanly. content_text
+    and content_chars are only clobbered when the new row is a success so
+    a failed retry doesn't wipe a previously-stored good extraction.
+    """
+    import time as _t
+    now_ts = int(_t.time())
+    content_chars = len(content_text) if content_text else None
+    conn.execute(
+        """
+        INSERT INTO link_context (
+            canonical_url, fetched_at, fetch_status, fetch_error,
+            content_text, content_chars, content_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(canonical_url) DO UPDATE SET
+            fetched_at    = excluded.fetched_at,
+            fetch_status  = excluded.fetch_status,
+            fetch_error   = excluded.fetch_error,
+            content_text  = CASE WHEN excluded.fetch_status = 'success'
+                                 THEN excluded.content_text
+                                 ELSE link_context.content_text END,
+            content_chars = CASE WHEN excluded.fetch_status = 'success'
+                                 THEN excluded.content_chars
+                                 ELSE link_context.content_chars END,
+            content_bytes = excluded.content_bytes
+        """,
+        (canonical_url, now_ts, status, error, content_text, content_chars, content_bytes),
+    )
+
+
+def get_link_texts(conn, canonical_urls):
+    """Look up extracted article texts for a list of canonical URLs in one query.
+
+    Returns: dict[canonical_url -> {"fetch_status", "fetch_error",
+                                     "content_text", "content_chars",
+                                     "content_bytes", "fetched_at"}].
+    Missing URLs are simply not in the returned dict.
+    """
+    if not canonical_urls:
+        return {}
+    placeholders = ",".join("?" for _ in canonical_urls)
+    rows = conn.execute(
+        f"""
+        SELECT canonical_url, fetch_status, fetch_error,
+               content_text, content_chars, content_bytes, fetched_at
+        FROM link_context
+        WHERE canonical_url IN ({placeholders})
+        """,
+        tuple(canonical_urls),
+    ).fetchall()
+    out = {}
+    for r in rows:
+        d = dict(r)
+        out[d.pop("canonical_url")] = d
+    return out
+
+
+def get_link_context_stats(conn):
+    """Return counts of link_context rows by status. Useful for /debug."""
+    rows = conn.execute(
+        """
+        SELECT fetch_status, COUNT(*) AS n
+        FROM link_context
         GROUP BY fetch_status
         """
     ).fetchall()

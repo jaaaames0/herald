@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-herald_parser.py — Parse and normalise tweets for Herald.
+parser.py — Parse and normalise tweets for Herald.
 
-Input: unified JSON array on stdin (output of herald_collect.py — RTs already
+Input: unified JSON array on stdin (output of collect.py — RTs already
        resolved, age-gate applied). The parser is a pure data transformation
        with no bird dependencies.
 
@@ -29,7 +29,6 @@ Phase 3 source collectors can map other platforms' concepts (e.g., Mastodon
 
 import json
 import sys
-import argparse
 
 
 def get_tweet_text(tweet):
@@ -251,11 +250,6 @@ def parse_tweet(tweet):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse bird tweets to Herald feed format")
-    parser.add_argument("-n", type=int, default=75, help="Number of tweets (ignored)")
-    parser.add_argument("--following", action="store_true", help="Ignored")
-    parser.parse_known_args()
-
     tweets = json.load(sys.stdin)
     if not isinstance(tweets, list):
         tweets = [tweets]

@@ -7,7 +7,7 @@ Posts and accounts are upserted; each ingest run is logged to pipeline_runs for 
 
 Usage:
     python3 herald_ingest.py parsed.jsonl
-    python3 herald_parser.py < unified.json | python3 herald_ingest.py
+    python3 parser.py < unified.json | python3 herald_ingest.py
 """
 import json
 import sys

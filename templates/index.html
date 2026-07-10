@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}herald — latest digests{% endblock %}
+{% block content %}
+
+<div class="cover">
+  <h1>latest digests</h1>
+  <div class="cover-meta">
+    <span>{{ digests|length }} digest{{ '' if digests|length == 1 else 's' }} on file</span>
+    <span>twice daily &middot; 06:00 / 14:00 AEST</span>
+  </div>
+</div>
+
+{% if digests %}
+<div class="digest-list">
+  {% for d in digests %}
+  <a class="digest-card" href="{{ url_for('digest', digest_id=d.id) }}">
+    <div class="digest-card-head">
+      <span class="digest-card-title">
+        digest #{{ d.id }} &middot;
+        {% if d.window_hours %}{{ '%g'|format(d.window_hours) }}h window{% else %}{{ ts(d.period_start) }} → {{ ts(d.period_end) }}{% endif %}
+      </span>
+      <span class="digest-card-ago">{{ d.generated_ago }}</span>
+    </div>
+    <div class="digest-card-meta">
+      <span><strong>{{ d.story_count }}</strong> stor{{ 'y' if d.story_count == 1 else 'ies' }}</span>
+      <span><strong>{{ d.input_count }}</strong> candidate post{{ '' if d.input_count == 1 else 's' }}</span>
+      {% if d.cost_usd %}<span><strong>${{ '%.4f'|format(d.cost_usd) }}</strong> via {{ d.model or '?' }}</span>{% endif %}
+      {% if d.tokens_in %}<span>{{ "{:,}".format(d.tokens_in) }} in / {{ "{:,}".format(d.tokens_out) }} out tokens</span>{% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <h3>no digests yet</h3>
+  <p>Run <code>python3 /home/james/srv/herald/herald_digest.py digest --since "12h ago"</code> on optiplex to generate the first one.</p>
+</div>
+{% endif %}
+
+{% endblock %}

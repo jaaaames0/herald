@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-herald_collect.py — Herald's collector layer.
+collect.py — Herald's collector layer.
 
 Reads raw `bird home --json-full` output (a JSON array), resolves retweets by
 fetching originals via `bird read`, applies the age gate to drop ads, and
 outputs a unified JSON array of "real" tweets ready for the parser.
 
-The collector is the only layer that knows about bird; herald_parser.py is
+The collector is the only layer that knows about bird; parser.py is
 pure data transformation with no bird dependencies.
 
 Why RTs go through `bird read`:
@@ -30,8 +30,8 @@ Auth:
   systemd, and cron contexts. The .env file should be chmod 600.
 
 Usage:
-    bird home -n 75 --following --json-full | herald_collect.py > unified.json
-    herald_collect.py test_tweets.json > unified.json
+    bird home -n 75 --following --json-full | collect.py > unified.json
+    collect.py test_tweets.json > unified.json
 """
 
 import json
@@ -41,6 +41,9 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import herald_env
+from herald_env import load_herald_env, HERALD_ENV_PATH  # re-export for back-compat
+
 
 # Default age gate: drop tweets older than this (in hours).
 # Ads are typically days/weeks old; normal feed pull is minutes/hours old.
@@ -48,37 +51,6 @@ DEFAULT_MAX_AGE_HOURS = 24
 
 # Bird binary path (configurable via env for tests / alt installs)
 BIRD_BIN = os.environ.get("HERALD_BIRD_BIN", "bird")
-
-# Path to herald's .env file with Twitter auth (chmod 600).
-HERALD_ENV_PATH = Path(os.environ.get("HERALD_ENV_PATH", "~/.config/herald/.env")).expanduser()
-
-
-def load_herald_env():
-    """Source ~/.config/herald/.env into the current process's env if AUTH_TOKEN
-    is not already set. This lets the collector work the same way regardless of
-    how it's invoked (interactive shell, SSH, systemd, cron).
-    Format: simple KEY=VALUE lines, # comments, blank lines ignored.
-    """
-    if os.environ.get("AUTH_TOKEN"):
-        return  # already set by parent context
-    if not HERALD_ENV_PATH.exists():
-        return  # no .env file; let bird surface the missing-creds error
-    try:
-        with open(HERALD_ENV_PATH) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip('"').strip("'")
-                    # Only set vars that look like Herald/Twitter auth, don't
-                    # accidentally import unrelated env vars.
-                    if k in ("AUTH_TOKEN", "CT0", "HERALD_BIRD_BIN", "HERALD_ENV_PATH"):
-                        os.environ.setdefault(k, v)
-    except OSError as e:
-        print(f"WARN: could not read {HERALD_ENV_PATH}: {e}", file=sys.stderr)
 
 
 def parse_twitter_date(s):
@@ -195,7 +167,7 @@ def main():
         resolved.append(tweet)
 
     print(
-        f"[herald_collect] input={len(tweets)} rt_resolved={rt_resolved_count} "
+        f"[collect] input={len(tweets)} rt_resolved={rt_resolved_count} "
         f"rt_failed={rt_failed_count} age_dropped={age_dropped_count} "
         f"age_unknown_kept={age_unknown_kept} output={len(resolved)}",
         file=sys.stderr,

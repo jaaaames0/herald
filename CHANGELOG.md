@@ -4,6 +4,501 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 
 ---
 
+## 2026-07-10 — Phase 3.7.3: age-adjusted engagement + flat 2h cadence
+
+The ranker systematically over-ranked older tweets. A 24h-old tweet
+with 500 likes (21/h) beat a 1h-old rising tweet with 50 likes (50/h)
+just because raw engagement was bigger. The interesting moment in a
+tweet's life is the rise, not the plateau; the ranker was rewarding
+plateau.
+
+**What's new:**
+
+- `herald_embed.cluster_score` now divides engagement by hours since
+  the post landed (`age_hours = max(0.5, (now - created_at) / 3600)`).
+  Cluster formula: `size_boost × mean_age_adjusted_engagement ×
+  follower_weight`. Same engagement formula
+  (`likes + 2*retweets + replies`), same size boost, same follower
+  weight. Just the engagement term is normalised by age.
+- A new `now_ts` parameter on `cluster_score` makes scoring
+  deterministic for testing.
+- The metric is not passed to the LLM (stage 1 sees raw engagement).
+  Age adjustment is a ranker concern, not an editorial concern —
+  the editor does editorial work, not math.
+- Collect cadence dropped from peak 30min / off-peak 2h to a flat 2h.
+  Less infrastructure, same editorial outcome. The peak window was
+  tuned for US-daytime tweet volume but the over-fetch
+  (`-n 200` per run) plus the age-adjusted ranker are robust to
+  missing the most recent half-hour.
+
+**What we explicitly did NOT do:** periodic metrics refresh. A
+2h-old tweet that has had time to accumulate *some* engagement is
+already informative under the new score. Trajectory signal is
+nice-to-have, not need-to-have. The schema migration cost (save
+metrics + timestamp, compute Δ on each refresh) is real and not
+worth it for the marginal accuracy gain. Defer to a Phase 4 stretch
+item if it turns out to matter.
+
+**Verification (test_age_adjusted_ranker.py, 5 tests):**
+
+- Test 1: fresh tweet (1h, 50 likes) at 50/h scores 153.2 vs stale
+  tweet (24h, 500 likes) at 21/h scores 65.6. ✓
+- Test 2: 0.5h clamp prevents div-by-zero on freshly-published
+  tweets. ✓
+- Test 3: `now_ts` parameter works for deterministic test scoring. ✓
+- Test 4: mixed-age cluster uses mean of age-adjusted values. ✓
+- Test 5: regression test — old formula scores stale 501 vs fresh 51
+  (10× bias). New formula reverses it: fresh 153 vs stale 66. ✓
+
+**Cadence change (systemd, user to apply):** edit
+`/etc/systemd/system/herald-collect.timer`. Replace the two
+`OnCalendar` lines with a single `OnCalendar=*:00/2` line
+(every 2 hours starting at 00:00 UTC), then
+`sudo systemctl daemon-reload && sudo systemctl restart
+herald-collect.timer`. Service file unchanged (already pulls
+`-n 200` per run).
+
+**Files changed:** `herald_embed.py` (cluster_score + new import),
+`test_age_adjusted_ranker.py` (new, 5 tests),
+`/etc/systemd/system/herald-collect.timer` (user to edit).
+
+**Hard constraints unchanged:** source-grounding, JSON output schema,
+image + link context, voice & scope from 3.7.1, items tier from 3.8.
+
+**Followup:** monitor tomorrow's digests. If the age-adjusted ranker
+is producing noticeably better variety (different candidates than
+the pre-3.7.3 run), Phase 3.7 is closed. If not, the next thing to
+try is the deferred metrics refresh — but only as a Phase 4 stretch
+item, not as a 3.7.4.
+
+---
+
+## 2026-07-10 — Phase 3.8: editor discretion + sliding-scale stories
+
+The variety problem. The digest reliably returned 3-5 stories per cycle,
+all on the same heavy themes (Bitcoin, AI, US politics). Off-beat,
+high-engagement singletons never surfaced as stories — they didn't form
+multi-post clusters, so stage 1 dropped them. The reader got a digest
+that was well-written but monotonous.
+
+The fix reframes stage 1 from formatter to editor: the editor decides
+what's worth covering today, at what depth, in what shape. If today
+genuinely has only three angles, three is the right answer. If it has
+twenty, twenty is the right answer. No quota, no rigid story/item
+split.
+
+### What's new
+
+**3.8.1 — Stage 1 becomes the editor.** `STAGE1_SYSTEM` reframed. The
+output schema gains two optional fields:
+
+- `items`: array of `{post_id, why, kind}` for single-post picks that
+  didn't form a theme. `kind` is the editor's own tag (news, humor,
+  quote, meme, off-beat, link, sidebar, observation, etc.).
+- `editor_notes`: 1-3 sentence paragraph from editor to writers about
+  today's tone.
+
+Both are optional. The editor can pick 0-N items and write 0-N stories.
+
+**3.8.1 — Reasoning-token caps (hotfix).** Live digest 32 hit
+`HERALD_STAGE1_MAX_TOKENS=64000` with `finish_reason=length` on the new
+bigger prompt. Output was `{"final{"` plus whitespace. Cost: $0.025
+for nothing. The reasoning model `gpt-oss-120b` burned the entire
+budget on chain-of-thought. OpenRouter's `max_reasoning_tokens`
+parameter caps it. Defaults: stage 1 = 4000, stage 2 = 2000. New env
+vars `HERALD_STAGE{1,2}_MAX_REASONING_TOKENS` (whitelisted in
+`herald_env.LOAD_KEYS`). Digest 33 with cap in place: cost $0.0013,
+finish `stop`.
+
+**3.8.2 — Stage 2 sliding-scale prompt.** `stage2_story` now accepts
+`editor_notes`. The user message includes a `SCOPE: N source post(s)`
+line plus the editor notes (when present). `STAGE2_SYSTEM` adds
+guidance: `n_sources >= 5` → 3-5 paragraph feature; `2-4` → 1-2
+paragraph brief; `1` → 1-2 sentence caption or verbatim pass-through.
+The same stage-2 prompt handles all depths.
+
+**3.8.3 — Items become regular stories rows.** No new enum, no
+`coverage_type='item'`. Items persist as standard `stories` rows with
+`theme_label = kind` (so queryable but no separate class). Storage
+treats items and stories identically. Both flow through the same
+`upsert_digest_with_stories` path.
+
+**3.8.4 — Web UI renders items inline.** Same Stories section, same
+row markup. Items get a `.story-item` class (lighter padding,
+transparent background, accent border, no number prefix). Detected
+via `post_count == 1` (covers all current item shapes; kind-list
+fallback handles future multi-post items).
+
+### Verification
+
+**Digest 34 (2026-07-10, live):** 5 stories + 5 items = 10 entries.
+
+- Stories: OpenAI product rollout, EU chat-control law, NEO humanoid
+  hand breakthrough, Rent-control debate, AI price-war & model costs.
+- Items: humor (×2), news, political, off-beat.
+- Total cost: $0.0065.
+- Stage 1 finish: `stop` (cap holds).
+- Web UI: all items render with `.story-item` class after
+  `herald-web.service` restart.
+
+**Cost breakdown:**
+- Pre-3.8 (3 stories): $0.005-0.010
+- 3.8 (5 stories + 5 items): $0.0065
+- Delta per digest: roughly flat. The "extra" items are each ~$0.0002-
+  $0.0006 (1 LLM call with sliding-scale prompt + 1 source post).
+
+### Files changed
+
+- `herald_synthesise.py` — STAGE1_SYSTEM editor reframing, STAGE2_SYSTEM
+  sliding scale + editor_notes, `max_reasoning_tokens` plumbing in
+  `_call`, `stage2_story` accepts `editor_notes`, dry-run stubs
+  updated, new env-driven constants `STAGE{1,2}_MAX_REASONING_TOKENS`.
+- `herald_env.py` — whitelisted `HERALD_MAX_CANDIDATES`,
+  `HERALD_MAX_ITEMS_PER_DIGEST`,
+  `HERALD_STAGE{1,2}_MAX_REASONING_TOKENS`.
+- `herald_digest.py` — items loop in `cmd_digest`, `editor_notes`
+  pass-through, `MAX_ITEMS_PER_DIGEST` constant (default 10).
+- `templates/digest.html` — `story-item` class detection (based on
+  `post_count == 1` or known kind list), number prefix hidden for items.
+- `static/css/herald.css` — `.story-item` lighter visual treatment.
+- `ROADMAP.md` — Phase 3.7.3 rewritten (metrics refresh, not bird
+  volume); 3.7.4/3.7.5 marked SUPERSEDED; 3.7.2 marked DEFERRED; 3.8
+  marked DONE.
+
+### Hard constraints unchanged
+
+- Source-grounding rules (every claim cites `[post:ID]`, verbatim quotes
+  with attribution, no fabrication).
+- JSON output schema for stage 2 (`headline`, `story`, `topic`,
+  `key_quotes`, `coverage_type`, `section`).
+- Image + link context rendering.
+- "Voice & scope" paragraph from Phase 3.7.1.
+
+### What we're NOT changing yet
+
+- **3.7.2 (ranker flattening)** — DEFERRED. Candidates are good as-is;
+  3.8 surfaces what the ranker would have otherwise filtered. Revisit
+  if 3.8 doesn't fix the variety problem in practice.
+- **3.7.3 (metrics refresh)** — REWRITTEN. New plan in ROADMAP. Not
+  started. Adjacent problem (better ranker input) but separate work.
+- **Model swap** — stay on `gpt-oss-120b`. Sliding-scale prompt + the
+  reasoning cap together give us much better cost/quality than
+  swapping.
+- **Multi-source (Phase 4)** — deferred. 3.8 changes output shape on
+  X-only corpus; Phase 4 changes the corpus itself.
+
+### Outstanding follow-up
+
+- **PR 2 refactor backlog** (ROADMAP §"Backlog — code health (PR 2
+  refactors, deferred)"). MR-1, MR-4, MR-5, MR-6 + schema cleanup.
+  Captured 2026-07-09 from code health audit; zero behavior change.
+  Ship when convenient.
+- **Hotfix history**: 2026-07-08 (digest 24 empty-headline crash),
+  2026-07-09 (PR1 cleanup), 2026-07-10 (digest 32 reasoning-budget
+  blowout → reasoning caps).
+
+---
+
+## 2026-07-09 — Phase 3.7.1: editorial voice + 7 stories/digest
+
+The digest is doing what it was designed to do (replace 30min of X scrolling
+with 15min of read), but the read doesn't quite *feel* like the timeline.
+Two weeks in, the voice is too uniform — too "news / signal / debate /
+consensus," too little room for the off-beat, single-post, weird moment
+that lands on its own. James: the read should feel like the timeline felt,
+not a sanitised summary of it.
+
+Goal of 3.7.1: keep the source-grounding invariant, but widen the editorial
+range. Three changes, one tiny pass, fully reversible.
+
+**What's new:**
+
+- **`VOICE & SCOPE` paragraph added to `STAGE2_SYSTEM`** in
+  `herald_synthesise.py`. Anchors the register to a concrete reference
+  set — Daring Fireball, The Verge's feature pages, Rest of World —
+  rather than "casual chat" or "news brief." Explicitly allows:
+  - Single-post stories ("a single striking tweet can carry a whole
+    story. Don't pad with manufactured significance").
+  - Off-beat / sideways / weird / internet-native moments "on their
+    own merits."
+  - Matching the energy of the source posts when it's distinctive
+    (funny → funny, dry → dry, absurdist → name the absurdity).
+  - One meta-instruction: "humour often gets lost in synthesis — lean
+    toward the source's register rather than your own; if the posts
+    are joking, the story should not be solemnly explaining the joke."
+  - The hard constraint is explicit: "The source-grounding rules above
+    are HARD. The voice here is not — when in tension, grounding wins."
+
+- **`debate_lines` + `signal_vs_noise` removed from the pipeline.**
+  They were in the stage-1 prompt, persisted to the `digests` table
+  (JSON columns), and rendered in the web UI ("lines of debate" /
+  "signal vs noise" sections). None of this was consumed by stage 2
+  (it reads only `stories_to_write` + per-theme `angle`), so dropping
+  them carries zero synthesis risk. Changes:
+  - Stage-1 prompt: blocks + dry-run stub + comment about every
+    observation citing ≥1 source post updated to refer to `zeitgeist`
+    only. `stories_to_write` cap raised from 3-5 to 3-7.
+  - `herald_digest.py`: theme-to-post mapping no longer walks
+    `debate_lines` or `signal_vs_noise.noise_patterns`. The dead
+    `noise_pids` extraction loop removed.
+  - `herald_db.upsert_digest_with_stories`: kwargs dropped. INSERT
+    still lists the columns and passes `None` (DB schema unchanged,
+    columns retained for back-compat with old digests).
+  - `templates/digest.html`: LINES OF DEBATE and SIGNAL vs NOISE
+    blocks removed entirely.
+  - Storage savings: ~200 bytes/digest. Visual savings: two UI
+    sections per digest page.
+
+- **`--top` default 5 → 7.** Two more stories per digest, more
+  headroom for the off-beat / singleton picks that 3.7.1 is trying
+  to surface. Cap is still 10 (matches README's "5–10 substantive
+  narrative stories" range). Updated: argparse default, docstring,
+  README example, CLAUDE.md example, systemd units
+  (`herald-digest-morning.service`, `herald-digest-afternoon.service`),
+  README + CLAUDE.md tunables tables (added `--top` row).
+
+**Hard constraints unchanged:** source-grounding rules (`[post:ID]`
+on every claim, verbatim quotes with attribution, paraphrase don't
+fabricate, no information already established earlier in the digest),
+JSON output schema (headline, story, topic, key_quotes, coverage_type,
+section), image + link context rendering.
+
+**Verification:** all `herald_*` modules import cleanly; `ast.parse`
+on all edited files clean; `test_image_context.py` 8/8 pass;
+`test_link_context.py` 16/16 pass; dry-run digest on the live DB
+runs end-to-end (466 posts in window → 40 candidates → stub output
+rendered); web template renders cleanly with zero `debate-side` /
+`svn-grid` classes in the output.
+
+**What we're NOT changing yet (Phase 3.7.2 and beyond):**
+- Ranker flattening (3.7.2): next pass, after we see if the new
+  voice alone produces better digests.
+- Metrics refresh (3.7.3, rewrite of the original "raise bird
+  volume" idea): separate pass, after we see if 3.7.1 lands.
+- Model swap to a prose-strong LLM: stay on `gpt-oss-120b` until
+  3.7.1-3.7.5 are exhausted. Reasoning model may be over-thinking
+  on the synthesis path; not certain. Try voice first.
+- HERALD_MAX_CANDIDATES: stay at 40. Raising to 60 is a possible
+  follow-up to 3.7.1 if we discover the ranker is the bottleneck.
+
+**Files changed:**
+- `herald_synthesise.py` (STAGE2_SYSTEM, STAGE1_SYSTEM, stage1 stub)
+- `herald_digest.py` (theme-to-posts, storage call, --top default,
+  print guard from earlier hotfix)
+- `herald_db.py` (upsert_digest_with_stories signature + INSERT)
+- `templates/digest.html` (debate + signal-vs-noise blocks removed)
+- `README.md`, `CLAUDE.md`, `DESIGN.md` (doco sync)
+- `ROADMAP.md` (3.7.1 status flipped to DONE)
+- `/etc/systemd/system/herald-digest-{morning,afternoon}.service`
+  (--top 5 → --top 7)
+
+---
+
+## 2026-07-06 — Phase 3.6.2: link context expansion
+
+Shipped link-content extraction for outbound links in candidate posts. The
+LLM now sees the actual article body — not just the URL string and the
+post's surrounding tweet text. No LLM in the middle (per James: "AI summary
+of an AI summary" loses grounding); straight HTTP GET → stdlib HTMLParser
+→ strip chrome → ship raw text to stage-2.
+
+**What's new:**
+
+- `link_context` cache table mirrors `image_context` / `quote_context` shape:
+  one row per canonical URL (tracking-stripped, lowercased host), with
+  `fetched_at`, `fetch_status`, `fetch_error`, `content_text`, `content_chars`,
+  `content_bytes`. No `model` column — no LLM involved. PK is `canonical_url`
+  so duplicate links across many posts collapse to one row.
+- `herald_links.py` new module:
+  - `fetch_link_text(url)` — one HTTP GET + extraction. Returns a tagged
+    dict (never raises). Failure modes mapped: `http`, `timeout`, `url`,
+    `too_large`, `decode`, `other`, `empty` (extraction below min chars).
+  - `MainContentParser` — stdlib `HTMLParser` subclass. Strips nav/footer/
+    scripts/styles/OG tags. Scopes extraction to the article's main
+    content container (see "landmarks" below).
+  - `_canonicalise_url(url)` — strips `utm_*`, `fbclid`, `gclid`, `ref`,
+    `mc_eid`, `igshid`, `_hsenc`, `_hsmi`, `mkt_tok`, `yclid`, `msclkid`,
+    `icid`, plus operator-tunable `HERALD_LINK_DROP_QUERY_KEYS` (default
+    `src`). Lowercases scheme + host. Preserves path + fragment.
+  - `enrich_link_batch(posts, max_fetches)` — collect-time eager fetch,
+    same shape as `enrich_media_batch`. Deduped, budget-capped, never
+    aborts on per-URL failure.
+  - `attach_link_context(candidates)` — digest-time lookup, sets
+    `candidate["_link_context"]` to `list[{post_id, url, text}]` and
+    `candidate["_link_skipped"]` to `[]` (symmetry with images).
+- LINK CONTEXT block in stage-2 prompt, between IMAGE CONTEXT and the
+  "Write the story JSON now." footer. Per-story cap
+  `HERALD_LINKS_PER_STORY` (default 2) — engagement-priority sort so
+  the most-amplified article wins when a cluster has many.
+- 9 new `HERALD_LINK_*` env knobs in `herald_env.LOAD_KEYS`:
+  - `HERALD_LINKS_PER_STORY=2`
+  - `HERALD_LINK_MAX_CHARS_RENDER=4000` — per-link truncation at render
+  - `HERALD_LINK_MAX_CHARS_STORE=8000` — per-row DB cap
+  - `HERALD_LINK_MAX_BYTES_FETCH=2097152` — bail out on oversize bodies
+  - `HERALD_LINK_TIMEOUT=10` — per-fetch seconds
+  - `HERALD_LINK_MIN_TEXT_CHARS=50` — below this → treat as empty
+  - `HERALD_MAX_LINK_FETCHES_PER_CYCLE=10` — collect-time budget
+  - `HERALD_LINK_USER_AGENT` — set a real Mozilla UA
+  - `HERALD_LINK_DROP_QUERY_KEYS` — operator-tunable extra drops
+- Wiring in `herald_digest.py`: collect-time `enrich_link_batch` after
+  `enrich_media_batch`; digest-time `attach_link_context` after
+  `attach_media_context`. Both inside `try/except` so a failure in one
+  doesn't abort the other.
+
+**Extraction strategy (MainContentParser):**
+
+The parser walks the HTML and emits text from inside one of these
+"landmarks" (if found) or falls back to "extract everything except
+SKIP_TAGS" if none are present:
+
+- Real landmark tags: `<main>`, `<article>`, `role="main"`
+- Article-body class landmarks: divs with class containing
+  `RichTextStoryBody`, `RichTextBody`, `StoryPage-lede`, `ArticleBody`,
+  `article-body`, `story-body`, `post-content`, `entry-content`, etc.
+
+Skip-class chrome (skipped even inside `<main>`):
+
+- `Carousel*` — photo carousels with duplicate captions
+- `StoryPage-lede` / `Page-lead` — lede/title block (duplicate of post text)
+- `StoryPage-actions` / `Page-actions` / `ActionBar` / `ActionLink` —
+  share button text
+- `Author-bio` / `Author-content` — author bio at article end
+- `Promo*` — promotional content
+- `PageListRightRail*` / `Sidebar` / `Related` — sidebar widgets
+
+Skip-class check runs BEFORE article-body check so a div with
+`class="Author-bio RichTextBody"` (AP News author block) is correctly
+skipped rather than mistaken for the article body.
+
+On the FIRST landmark encountered, any text captured before it is
+discarded (page `<title>`, meta description, etc.). Stack-based landmark
+tracking — push tag on open, pop on close — so div-based landmarks work
+correctly without the matching-close ambiguity that depth counters have.
+
+**Bugs found + fixed during dev (test_link_context.py is the regression
+test):**
+
+1. **First implementation walked the whole document, capturing pre-`<main>`
+   chrome.** Saturated the 8000-char cap with nav menus and section
+   headers before reaching the article body. Fix: scope extraction to
+   inside the first landmark; flush pre-landmark text.
+
+2. **`<main>` alone wasn't enough for AP News.** AP wraps the whole page
+   in `<main>` including nav and sidebars; the article body lives in
+   `<div class="RichTextStoryBody RichTextBody">`. Fix: add article-body
+   class patterns as sub-landmarks.
+
+3. **Photo carousel chrome.** AP News' `<main>` contains a 5-photo
+   carousel with ~250-char captions × 2 layers (slide + overlay) =
+   ~2500 chars of duplicate caption text eating the cap. Fix: skip-class
+   patterns for `Carousel*`, `Page-actions*`, `Author-bio`, etc.
+
+**Verified end-to-end:**
+
+- Manual: ran the `herald-compare-story1.py` comparison script for
+  digest 21 story 1 (post 2073866321247285454 from @AP, linking to AP
+  News Balogun red card coverage). The with-link-context version adds:
+  - Referee name (Raphael Claus)
+  - Historical precedent (first reversal since 1962)
+  - Direct Trump quote with attribution
+  - Belgian coach Rudi Garcia quote with attribution
+  - Court of Arbitration for Sport legal angle
+  - Specific round-of-16 match
+  All of these are in the AP News article but in NONE of the 3 source
+  X posts.
+- Cost: stage-2 call goes from $0.000164 to $0.000308 (+$0.000144 per
+  story). Trivial at scale.
+
+**Tests:** `test_link_context.py` 16/16 (Test 1-9 unit coverage; Test 10-12
+landmark detection including synthetic chrome-heavy pages, no-landmark
+fallback, role=main; Test 13 real AP News HTML regression; Test 14-15
+article-body class patterns; Test 16 carousel+lede+author+sidebar skip).
+Total: 36/36 across `test_image_context.py` (8) + `test_parser_v2.py` (20) +
+`test_link_context.py` (8 new in this phase).
+
+**Files added:** `herald_links.py`, `test_link_context.py`
+**Files modified:** `schema.sql`, `herald_db.py`, `herald_synthesise.py`,
+`herald_digest.py`, `herald_env.py`, `test_link_context.py`
+
+---
+
+## 2026-07-06 — Project state snapshot
+
+Snapshot for whoever picks up the codebase next. Herald's pipeline
+(collect / ingest / pre-filter / two-stage synthesise / web UI / timers)
+is unchanged — this entry documents current state, ops quick reference,
+and known failure modes so a new agent has everything in one place.
+
+**Production state at snapshot:**
+- Last successful digest: **#20** (2026-07-05 20:01 UTC, 16h window,
+  5 stories, $0.0089, 91s end-to-end)
+- DB: `/var/lib/herald/herald.db` — SQLite WAL, ~3682 posts, healthy
+- All four timers armed and waiting
+- Web UI live at https://herald.jaaaames.com
+- Phase 3, 3.5, 3.5.1, 3.6.1 shipped. Phase 3.6.2 (link context) and
+  Phase 4 (multi-source) are next.
+
+**Where to read first** (in this order):
+1. `/home/james/srv/herald/README.md` — orientation, status, quick start
+2. `/home/james/srv/herald/DESIGN.md` — architecture, schema, source-grounding, decisions
+3. `/home/james/srv/herald/ROADMAP.md` — phases, what's done, what's next
+4. `/home/james/srv/herald/CHANGELOG.md` — dated history (this file)
+
+**Operational quick reference (all on optiplex as user `james`):**
+
+```bash
+# Manual collect
+cd ~/srv/herald && python3 herald_digest.py collect
+
+# Manual digest (real LLM call, ~90s, ~$0.009)
+cd ~/srv/herald && python3 herald_digest.py digest --since "12h ago" --top 5 --max-candidates 40
+
+# Dry-run (no LLM, free)
+cd ~/srv/herald && python3 herald_digest.py digest --since "12h ago" --dry-run --show
+
+# Pipeline health (last 24h, grouped by step+status)
+ssh optiplex "sqlite3 /var/lib/herald/herald.db \"SELECT step, status, COUNT(*) FROM pipeline_runs WHERE started_at > strftime('%s','now','-1 day') GROUP BY step, status\""
+
+# Timer status
+ssh optiplex "systemctl status herald-collect.timer herald-digest-morning.timer herald-digest-afternoon.timer --no-pager"
+
+# Tail digest log
+ssh optiplex "tail -50 /var/log/herald/digest.log"
+```
+
+**Open decisions waiting on James:**
+1. **Stage 2 model default**: switch from `openai/gpt-oss-120b` to
+   `google/gemini-2.5-flash` so the LLM uses image context (Phase 3.6.1).
+   Trade-off: ~5x cost per story, still trivial at scale.
+2. **Phase 3.6.2 (link context)**: scoped but not started. Raw-text
+   scraping (article body cleaned up, no OG tags, no LLM summary).
+3. **Phase 4 (multi-source)**: RSS collector first, then news API.
+
+**Failure modes to know about:**
+- Bird CLI requires Node >= 22. Optiplex has Node 18 system + 26 via nvm.
+  Always use `/home/james/.local/bin/bird-nvm` wrapper — never the
+  system bird (`/usr/local/bin/bird` uses system node and fails with
+  "Unexpected token with").
+- LLM transient failures (finish_reason=error, empty content, zero
+  cost) are now logged loudly in digest.log but do not crash the
+  pipeline. Will result in empty digest for that cycle.
+- Failed context fetches (fetch_status=failed) are sticky. Manual
+  retry: delete rows from quote_context / conversation_context /
+  image_context where fetch_status=failed.
+- WAL mode on SQLite (Phase 3.5 fix) means concurrent connections
+  no longer block. Do not run herald_digest.py collect and digest
+  at the same time by accident — they do not corrupt, but you will
+  get confusing interleaved log lines.
+
+**Test entry points** (no live Twitter needed):
+
+```bash
+cd ~/srv/herald
+HERALD_DB_PATH=/tmp/herald-test/test.db python3 test_parser_v2.py     # 20 cases
+HERALD_DB_PATH=/tmp/herald-test/test.db python3 test_image_context.py # 8 cases
+HERALD_DB_PATH=/tmp/herald-test/test.db ./test_mock_bird --help
+```
+
 ## 2026-07-04 — Phase 3.5.1: recursive quote+reply chain unraveling
 
 Builds on Phase 3.5. The previous version followed only the QUOTE dimension.
@@ -323,10 +818,10 @@ proportional to the moving parts it adds?"
   `what_changed` to the stories schema. Replaces the prior iteration's
   ad-hoc "Stories still developing" lists.
 - Studied prior iteration
-  (`~/tmp/openclaw-backup/workspace/projects/newsroom/`), especially
+  (`~/tmp/newsroom/`, the precursor project), especially
   `SYSTEM.md`, `schema.md`, `bird_parse.py`, `bird_context.py`. Key
-  finding: previous failure was caused by OpenClaw cron jobs driving the
-  agent via batch synthesis — confirmed "maxConcurrentRuns too high →
+  finding: previous failure was caused by agent-driven cron jobs running
+  batch LLM synthesis — confirmed "maxConcurrentRuns too high →
   AI service temporarily overloaded" failure mode. Herald's LLM
   architecture (no agent in the synthesis path) directly addresses this.
 - Inherited parser (`bird_parse.py`) and identified gaps to fix in
@@ -337,11 +832,11 @@ proportional to the moving parts it adds?"
   chicken; previous `credentials.env` is empty. Need `auth_token` + `ct0`
   cookies (via env vars, browser extraction, or flags).
 - Test fixtures identified. Existing feed files in
-  `~/tmp/openclaw-backup/workspace/projects/newsroom/feed/` (~12 JSONL
+  `~/tmp/newsroom/feed/` (~12 JSONL
   files, ~36 hours of X data) can drive Phase 0 development without
   needing live `bird` auth.
 - Reference sample digest.
-  `~/tmp/openclaw-backup/workspace/projects/newsroom/archive/2026-05-13_0600_digest.md`
+  `~/tmp/newsroom/archive/2026-05-13_0600_digest.md`
   is the model for the Herald digest format.
 
 ---

@@ -321,6 +321,12 @@ def _expand_context_chain(conn, parsed_dict, quote_depth, reply_depth, visited, 
         parent (if any) so the two dimensions stay intertwined. Otherwise a
         quote-of-reply-of-quote pattern would only follow the quote half and
         miss the reply half at deeper levels.
+
+        Symmetrically, when we recurse into qd_reply_parent, we ALSO follow
+        THAT's reply chain (load its parent, recurse) — otherwise a pure
+        reply chain with N>2 replies would stall after the first hop. The
+        `qd_reply_parent` passed in is already loaded; we recursively load
+        its parent here.
         """
         # Quote chain (decrements quote_depth only)
         if quote_depth_remaining > 0 and qd:
@@ -342,11 +348,24 @@ def _expand_context_chain(conn, parsed_dict, quote_depth, reply_depth, visited, 
                                 loaded["_parent_tweet"] = inner_parent
                     _walk(loaded, inner_parent, quote_depth_remaining - 1, reply_depth_remaining)
 
-        # Reply chain (decrements reply_depth only). The reply parent itself
-        # is loaded by the caller (so it's available to mutate `qd._parent_tweet`
-        # in place), then we recurse into ITS quote chain at full quote depth.
+        # Reply chain (decrements reply_depth only). When recursing into
+        # qd_reply_parent, also load ITS reply parent (handled by the same
+        # branch below) so we can chain N replies deep.
         if HERALD_FOLLOW_REPLY_PARENTS and reply_depth_remaining > 0 and qd_reply_parent is not None:
+            # First recurse into qd_reply_parent's quote chain at full depth.
             _walk(qd_reply_parent, None, quote_depth_remaining, reply_depth_remaining - 1)
+
+            # Then load qd_reply_parent's reply parent (if any) for the next
+            # hop up the reply chain.
+            inner_parent_id = (qd_reply_parent.get("conversation") or {}).get("parent_id")
+            if inner_parent_id and reply_depth_remaining - 1 > 0:
+                parent_stub = {
+                    "id": inner_parent_id, "url": "", "text": None, "author": None,
+                }
+                inner_parent = _load(parent_stub, "fetched-via-reply-chain")
+                if inner_parent is not None:
+                    qd_reply_parent["_parent_tweet"] = inner_parent
+                    _walk(inner_parent, None, quote_depth_remaining, reply_depth_remaining - 2)
 
     # First, ensure the starting tweet is loaded.
     starting_parsed = _load(parsed_dict, "fetched-via-quote-chain")
