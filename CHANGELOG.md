@@ -4,6 +4,84 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 
 ---
 
+## 2026-07-10 — PR 2: code health refactors (MR-1, MR-4, MR-6)
+
+Three small refactors deferred from the 2026-07-09 code health audit.
+Zero behavior change. Low risk. Shipped together since they're
+independent and all touch the same code area.
+
+**What's new:**
+
+- **MR-1 — `_protected_set_clause` helper in `herald_db.py`.** The
+  `CASE WHEN excluded.fetch_status = 'success' THEN excluded.X ELSE
+  table.X END` idiom appeared 4 times across the four cache
+  upsert functions (image, link, conversation, quote). Extracted
+  to a 3-line helper that takes `(table, col)` and returns the
+  SQL fragment. The four functions now read as: "this is the
+  INSERT, these are the protected columns, here are the always-
+  overwritten ones." Same SQL gets generated; cleaner source.
+  Net change: −20 lines.
+
+  Scoped down from the original MR-1 plan (which proposed a full
+  dynamic-SQL `generic_cache_upsert` helper). The full dynamic
+  approach hid columns and structure behind string formatting; the
+  `_protected_set_clause` keeps the SQL literal so each function
+  remains obviously readable.
+
+- **MR-4 — `_attach_all_contexts` helper in `herald_digest.py`.** The
+  three near-identical try/except blocks at digest time
+  (context / image / link attach) were ~50 lines of repetition.
+  Extracted to a single function that returns
+  `{thread, quote, image, link}` counts. cmd_digest now has one
+  call site; the helper is where future context features drop in.
+  Net change: −40 lines from cmd_digest, +45 lines in the
+  helper (most of the comments).
+
+- **MR-6 — Drop dead `needs_context_fetch` flag from `parser.py`.**
+  The flag was being written by `parse_conversation` but no reader
+  ever checked it. `herald_context.enrich_batch` decides what to
+  fetch based on `post_type == "reply"`, not the flag. Net change:
+  −1 line. Audit had two options (wire the flag or drop it); chose
+  drop because the existing `post_type` check is the cleaner signal.
+
+**Files changed:**
+
+- `herald_db.py` — added `_protected_set_clause` helper at top of
+  module; updated `upsert_image_context` and `upsert_link_context`
+  to use it; dropped `import time as _t` (already at module top).
+- `herald_context.py` — updated `_store_conv_context` and
+  `_store_quote_context` to use the same helper.
+- `herald_digest.py` — added `_attach_all_contexts` helper; replaced
+  3 try/except blocks in `cmd_digest` with one call.
+- `parser.py` — dropped `needs_context_fetch` from parent_tweet stub.
+
+**Verification:** all test suites pass.
+
+- `test_image_context.py` 8/8
+- `test_link_context.py` 16/16
+- `test_age_adjusted_ranker.py` 5/5
+- Dry-run digest runs end-to-end.
+
+**Not in this PR (deferred):**
+
+- **MR-5 (move debug scripts to scripts/)** — already done as part
+  of the 2026-07-10 cleanup before the last commit. `scripts/`
+  exists, `digest_readable.py` and `trace_digest.py` are there
+  with a `scripts/README.md`. Crossed off the audit's PR 2 list.
+- **Schema cleanup (SW-3/4/5/6/7/8)** — drop confirmed-dead
+  columns in `posts` (`raw`), `accounts` (`verified`/`bio`/
+  `display_name`/`notes`), `stories` (`section`/`continuity_story_id`/
+  `what_changed`), `digests` (`duration_estimate_minutes`). Real
+  migration with `ALTER TABLE` + rewrite. Out of scope for PR 2.
+  Defer to when those tables next need schema work.
+- **Wire `get_*_context_stats` helpers into `/debug`** (SW-1).
+  Defer to a dedicated observability pass.
+
+**Hard constraints unchanged.** All test suites pass. No behavior
+change; this is a refactor only.
+
+---
+
 ## 2026-07-10 — Phase 3.7.3: age-adjusted engagement + flat 2h cadence
 
 The ranker systematically over-ranked older tweets. A 24h-old tweet

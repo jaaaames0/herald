@@ -577,41 +577,48 @@ news stories.
   make it harder for stage 2 to misassign, easier to spot when it
   does).
 
-### Backlog — code health (PR 2 refactors, deferred)
+### Backlog — code health
 
-Captured 2026-07-09 from a code health audit (see CHANGELOG 2026-07-09).
-Zero behavior change, low risk, ship as a single PR when convenient. None
-of these are urgent — the codebase is in good shape. They make future
-work (Phase 3.8 / Phase 4) easier.
+Captured 2026-07-09 from a code health audit (see CHANGELOG 2026-07-09
+and 2026-07-10). Originally framed as "PR 2 refactors, deferred";
+MR-1, MR-4, MR-5, and MR-6 have since shipped (2026-07-10).
+Remaining: schema cleanup and the `/debug` observability pass.
 
-- **MR-1 — `generic_cache_upsert` in `herald_db.py`.** Dedupe the
-  `CASE WHEN ... = 'success' THEN ... ELSE ... END` SQL idiom shared by
-  `upsert_image_context`, `upsert_link_context`, `_store_conv_context`,
-  `_store_quote_context`. Net ~−60 lines, one less place to drift.
-  Highest-leverage refactor.
+- **MR-1 — `generic_cache_upsert` in `herald_db.py`.** ✅ DONE
+  (2026-07-10). Shipped as a smaller helper than originally planned:
+  `_protected_set_clause(table, col)` returns the
+  `CASE WHEN excluded.fetch_status = 'success' THEN excluded.X ELSE
+  table.X END` SQL fragment. Used by all four cache upsert functions
+  (image, link, conversation, quote). Net ~−20 lines, identical SQL
+  emitted, each function still obviously readable.
 - **MR-4 — Split `cmd_digest` (herald_digest.py:198–526, 328 lines).**
-  Extract `_attach_all_contexts` (the 4 near-identical try/except blocks
-  at lines 263–313 are the most failure-prone area), split stage-1 /
-  stage-2 / persist into named helpers.
-- **MR-5 — Move debug scripts to `scripts/`.** `digest_readable.py`,
-  `trace_digest.py`, `check_inline_quotes.py`, `scratch_*.py`, and
-  `validate.py` clutter the project root. Add a `scripts/README.md`
-  listing when each is useful. `validate.py` has hardcoded
-  `/home/james/...` paths and is referenced nowhere — delete or fix.
+  🟡 PARTIAL (2026-07-10). Shipped the highest-leverage piece:
+  `_attach_all_contexts(candidates)` replaces the 3 near-identical
+  try/except blocks (~50 lines → 1 call). cmd_digest is now ~280
+  lines. The remaining work (split stage-1 / stage-2 / persist into
+  named helpers) was deferred — would be a bigger refactor that
+  doesn't reduce surface area as much.
+- **MR-5 — Move debug scripts to `scripts/`.** ✅ DONE
+  (2026-07-10, pre-commit cleanup). `digest_readable.py` and
+  `trace_digest.py` moved to `scripts/` with a `scripts/README.md`.
+  Other one-offs (`scratch_*.py`, `check_inline_quotes.py`,
+  `validate.py`) deleted outright.
 - **MR-6 — `parser.py:108` `needs_context_fetch: True` flag is dead.**
-  No reader walks it; `herald_context._expand_context_chain` walks
-  `conversation.parent_id` directly. Wire or drop. Trivial — but
-  intent is unclear, worth a small follow-up.
+  ✅ DONE (2026-07-10). Dropped (chose drop over wire; `post_type ==
+  "reply"` is the cleaner signal that `enrich_batch` already uses).
 - **Schema cleanup — drop confirmed-dead columns in one migration.**
-  `posts.raw` (SW-3, never populated, ~75 × 10 KB saved per collect).
-  `accounts.verified` / `accounts.bio` / `accounts.display_name` /
-  `accounts.notes` (SW-4/5, parser doesn't extract). `stories.section`
-  (SW-6, only `'story'` ever written). `stories.continuity_story_id`
-  / `stories.what_changed` (SW-7, never written). `digests.duration_estimate_minutes`
-  (SW-8, always NULL).
+  ⏭ DEFERRED. `posts.raw` (SW-3, never populated, ~75 × 10 KB saved
+  per collect). `accounts.verified` / `accounts.bio` /
+  `accounts.display_name` / `accounts.notes` (SW-4/5, parser doesn't
+  extract). `stories.section` (SW-6, only `'story'` ever written).
+  `stories.continuity_story_id` / `stories.what_changed` (SW-7, never
+  written). `digests.duration_estimate_minutes` (SW-8, always NULL).
+  Real migration with `ALTER TABLE` + rewrite. Defer to when those
+  tables next need schema work.
 - **Wire `get_*_context_stats` helpers into `/debug`** (SW-1).
-  Currently unused; would surface image / link / conversation cache
-  hit rates. UX change — defer to a dedicated observability pass.
+  ⏭ DEFERRED. Currently unused; would surface image / link /
+  conversation cache hit rates. UX change — defer to a dedicated
+  observability pass.
 
 ---
 

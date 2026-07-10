@@ -104,7 +104,6 @@ def parse_conversation(tweet):
             "url":        f"https://x.com/_/status/{parent_id}",
             "text":       None,
             "author":     None,
-            "needs_context_fetch": True,
         }
 
     return result

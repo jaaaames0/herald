@@ -147,7 +147,7 @@ def _store_conv_context(conn, conv_id, status, thread=None, error=None, source_t
     thread_json = json.dumps(thread, ensure_ascii=False) if status == "success" and thread else "[]"
     tweet_count = len(thread) if (status == "success" and thread) else 0
     conn.execute(
-        """
+        f"""
         INSERT INTO conversation_context (
             conversation_id, fetched_at, fetch_status, fetch_error,
             thread_json, tweet_count, source_tweet_id
@@ -156,10 +156,8 @@ def _store_conv_context(conn, conv_id, status, thread=None, error=None, source_t
             fetched_at      = excluded.fetched_at,
             fetch_status    = excluded.fetch_status,
             fetch_error     = excluded.fetch_error,
-            thread_json     = CASE WHEN excluded.fetch_status = 'success'
-                                   THEN excluded.thread_json ELSE thread_json END,
-            tweet_count     = CASE WHEN excluded.fetch_status = 'success'
-                                   THEN excluded.tweet_count ELSE tweet_count END,
+            thread_json     = {herald_db._protected_set_clause('conversation_context', 'thread_json')},
+            tweet_count     = {herald_db._protected_set_clause('conversation_context', 'tweet_count')},
             source_tweet_id = excluded.source_tweet_id
         """,
         (conv_id, now, status, error, thread_json, tweet_count, source_tweet_id),
@@ -185,17 +183,15 @@ def _store_quote_context(conn, quoted_id, status, data=None, error=None, source=
     else:
         col = source
     conn.execute(
-        """
+        f"""
         INSERT INTO quote_context (
             quoted_tweet_id, fetched_at, fetch_status, fetch_error, data
         ) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(quoted_tweet_id) DO UPDATE SET
             fetched_at   = excluded.fetched_at,
             fetch_status = excluded.fetch_status,
-            fetch_error  = CASE WHEN excluded.fetch_status = 'success'
-                               THEN excluded.fetch_error ELSE fetch_error END,
-            data         = CASE WHEN excluded.fetch_status = 'success'
-                               THEN excluded.data ELSE data END
+            fetch_error  = {herald_db._protected_set_clause('quote_context', 'fetch_error')},
+            data         = {herald_db._protected_set_clause('quote_context', 'data')}
         """,
         (quoted_id, now, status, col, payload),
     )

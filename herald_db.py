@@ -11,6 +11,19 @@ DB_PATH = Path(os.environ.get("HERALD_DB_PATH", "/var/lib/herald/herald.db"))
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+# ---------- cache-table helpers (PR 2 refactor MR-1) ----------
+
+def _protected_set_clause(table, col):
+    """Return the ON CONFLICT assignment that preserves `col` unless the
+    incoming row is a success. All four cache tables (image, link,
+    conversation, quote) follow this pattern: a failed retry must not
+    clobber a previously-stored good extraction. Keeps the SQL literal
+    — no dynamic column names — so the query is readable and the columns
+    are still obvious in each function."""
+    return (f"{col} = CASE WHEN excluded.fetch_status = 'success' "
+            f"THEN excluded.{col} ELSE {table}.{col} END")
+
+
 def get_connection():
     """Open a SQLite connection to Herald's DB. Creates the parent dir if needed.
 
@@ -472,10 +485,9 @@ def upsert_image_context(conn, media_url, status, description=None, error=None, 
     so we don't accidentally clear a good description with a later 'failed'
     attempt (callers should not store 'failed' for an already-described URL).
     """
-    import time as _t
-    now_ts = int(_t.time())
+    now_ts = int(time.time())
     conn.execute(
-        """
+        f"""
         INSERT INTO image_context (
             media_url, fetched_at, fetch_status, fetch_error, description, model
         ) VALUES (?, ?, ?, ?, ?, ?)
@@ -483,12 +495,8 @@ def upsert_image_context(conn, media_url, status, description=None, error=None, 
             fetched_at   = excluded.fetched_at,
             fetch_status = excluded.fetch_status,
             fetch_error  = excluded.fetch_error,
-            description  = CASE WHEN excluded.fetch_status = 'success'
-                                 THEN excluded.description
-                                 ELSE image_context.description END,
-            model        = CASE WHEN excluded.fetch_status = 'success'
-                                 THEN excluded.model
-                                 ELSE image_context.model END
+            description  = {_protected_set_clause('image_context', 'description')},
+            model        = {_protected_set_clause('image_context', 'model')}
         """,
         (media_url, now_ts, status, error, description, model),
     )
@@ -545,11 +553,10 @@ def upsert_link_context(conn, canonical_url, status, content_text=None, error=No
     and content_chars are only clobbered when the new row is a success so
     a failed retry doesn't wipe a previously-stored good extraction.
     """
-    import time as _t
-    now_ts = int(_t.time())
+    now_ts = int(time.time())
     content_chars = len(content_text) if content_text else None
     conn.execute(
-        """
+        f"""
         INSERT INTO link_context (
             canonical_url, fetched_at, fetch_status, fetch_error,
             content_text, content_chars, content_bytes
@@ -558,12 +565,8 @@ def upsert_link_context(conn, canonical_url, status, content_text=None, error=No
             fetched_at    = excluded.fetched_at,
             fetch_status  = excluded.fetch_status,
             fetch_error   = excluded.fetch_error,
-            content_text  = CASE WHEN excluded.fetch_status = 'success'
-                                 THEN excluded.content_text
-                                 ELSE link_context.content_text END,
-            content_chars = CASE WHEN excluded.fetch_status = 'success'
-                                 THEN excluded.content_chars
-                                 ELSE link_context.content_chars END,
+            content_text  = {_protected_set_clause('link_context', 'content_text')},
+            content_chars = {_protected_set_clause('link_context', 'content_chars')},
             content_bytes = excluded.content_bytes
         """,
         (canonical_url, now_ts, status, error, content_text, content_chars, content_bytes),

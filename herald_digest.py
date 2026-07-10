@@ -199,6 +199,53 @@ def _posts_index_by_id(posts):
     return {p["id"]: p for p in posts}
 
 
+def _attach_all_contexts(candidates):
+    """Attach cached context (thread/quote/image/link) to candidates.
+
+    Each source is best-effort — a failure in one doesn't abort the others.
+    Returns a dict {thread, quote, image, link} of counts for the
+    digest-time log line. Centralising the four try/except blocks here
+    (rather than 50 lines of repetition in cmd_digest) means future
+    context features drop in as a single function call + counter. PR 2
+    refactor MR-4.
+    """
+    counts = {"thread": 0, "quote": 0, "image": 0, "link": 0}
+
+    # Thread + quote context (parser v2, 2026-07-03). DB lookup only —
+    # the eager fetch already ran during collect.
+    try:
+        import herald_context
+        herald_context.attach_context_to_candidates(candidates)
+        for c in candidates:
+            if c.get("_thread_context"):
+                counts["thread"] += 1
+            if c.get("_quote_context"):
+                counts["quote"] += 1
+    except Exception as e:
+        print(f"[digest] WARN: attach_context_to_candidates failed: {e}", file=sys.stderr)
+
+    # Image descriptions (Phase 3.6.1). Per-story cap
+    # (HERALD_IMAGES_PER_STORY) is applied later in stage 2 prompt assembly.
+    try:
+        import herald_media
+        herald_media.attach_media_context(candidates)
+        counts["image"] = sum(1 for c in candidates if c.get("_image_description"))
+    except Exception as e:
+        print(f"[digest] WARN: herald_media.attach_media_context failed: {e}", file=sys.stderr)
+
+    # Link context (Phase 3.6.2). Per-story cap (HERALD_LINKS_PER_STORY)
+    # applied later.
+    try:
+        import herald_links
+        herald_links.attach_link_context(candidates)
+        counts["link"] = sum(1 for c in candidates if c.get("_link_context"))
+    except Exception as e:
+        print(f"[digest] WARN: herald_links.attach_link_context failed: {e}", file=sys.stderr)
+
+    return counts
+
+
+
 def cmd_digest(args):
     """Pull posts in window → pre-filter (embed+cluster) → two-stage LLM digest.
 
@@ -259,62 +306,29 @@ def cmd_digest(args):
         # 2b. Attach cached thread/quote context to candidates (parser v2, 2026-07-03).
         # Fetches happened earlier during collect; this is just a DB lookup.
         # Cached context shows the LLM what a reply is replying to, so reply
-        # synthesis has the full conversational picture.
-        n_with_thread = 0
-        n_with_quote  = 0
-        n_with_image  = 0
-        n_with_link   = 0
-        try:
-            import herald_context
-            herald_context.attach_context_to_candidates(candidates)
-            for c in candidates:
-                if c.get("_thread_context"):
-                    n_with_thread += 1
-                if c.get("_quote_context"):
-                    n_with_quote += 1
-            if n_with_thread or n_with_quote:
-                print(
-                    f"[digest] context attached: {n_with_thread} threads, {n_with_quote} quote parents",
-                    file=sys.stderr,
-                )
-        except Exception as e:
-            print(f"[digest] WARN: attach_context_to_candidates failed: {e}", file=sys.stderr)
-
-        # Phase 3.6.1: attach image descriptions (lookups into image_context
-        # DB; descriptions were fetched earlier during collect). Per-story
-        # cap (HERALD_IMAGES_PER_STORY, default 1) is applied later in stage
-        # 2 prompt assembly.
-        try:
-            import herald_media
-            herald_media.attach_media_context(candidates)
-            for c in candidates:
-                if c.get("_image_description"):
-                    n_with_image += 1
-            if n_with_image:
-                print(
-                    f"[digest] image context: {n_with_image} candidates with descriptions",
-                    file=sys.stderr,
-                )
-        except Exception as e:
-            print(f"[digest] WARN: herald_media.attach_media_context failed: {e}", file=sys.stderr)
-
-        # Phase 3.6.2: attach link-context entries (lookups into link_context
-        # DB; article bodies were fetched earlier during collect). Per-story
-        # cap (HERALD_LINKS_PER_STORY, default 2) is applied later in stage
-        # 2 prompt assembly.
-        try:
-            import herald_links
-            herald_links.attach_link_context(candidates)
-            for c in candidates:
-                if c.get("_link_context"):
-                    n_with_link += 1
-            if n_with_link:
-                print(
-                    f"[digest] link context: {n_with_link} candidates with link extractions",
-                    file=sys.stderr,
-                )
-        except Exception as e:
-            print(f"[digest] WARN: herald_links.attach_link_context failed: {e}", file=sys.stderr)
+        # synthesis has the full conversational picture. All four
+        # attachers (thread, quote, image, link) live in one helper; see
+        # _attach_all_contexts. PR 2 refactor MR-4.
+        ctx_counts = _attach_all_contexts(candidates)
+        n_with_thread = ctx_counts["thread"]
+        n_with_quote  = ctx_counts["quote"]
+        n_with_image  = ctx_counts["image"]
+        n_with_link   = ctx_counts["link"]
+        if n_with_thread or n_with_quote:
+            print(
+                f"[digest] context attached: {n_with_thread} threads, {n_with_quote} quote parents",
+                file=sys.stderr,
+            )
+        if n_with_image:
+            print(
+                f"[digest] image context: {n_with_image} candidates with descriptions",
+                file=sys.stderr,
+            )
+        if n_with_link:
+            print(
+                f"[digest] link context: {n_with_link} candidates with link extractions",
+                file=sys.stderr,
+            )
 
         # 3. Stage 1: timeline map
         print(f"[digest] stage 1: timeline map...", file=sys.stderr)
