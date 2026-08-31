@@ -36,11 +36,11 @@ citations, broken quotes, story drift. No LLM call. Read-only.
 
 ## Why these aren't `test_*.py`
 
-The canonical test suite is at the project root
-(`test_parser_v2.py`, `test_image_context.py`, `test_link_context.py`,
-`test_age_adjusted_ranker.py`). Those are automated, fast, and
-deterministic. These scripts are interactive — they dump human-readable
-output to stdout for inspection.
+The canonical offline test programs are the `test_*.py` files at the project
+root. They cover parser/context behavior, media and link extraction, the
+restored editorial pipeline, the persistent story desk and its private review
+routes. These scripts are interactive — they dump human-readable output to
+stdout for inspection.
 
 ## History
 

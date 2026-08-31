@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 venv/
+.venv/
 
 # Herald runtime artefacts
 *.db
@@ -21,6 +22,9 @@ venv/
 # One-off investigations (kept on disk for reference, not part of the
 # codebase). Add new ones here rather than committing.
 quality_runs/
+
+# Captured timelines and one-off model output are local test/reference data.
+/test_data/
 
 # Local config / secrets — never commit
 .env

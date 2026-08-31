@@ -10,7 +10,10 @@ Lives on `optiplex`. Public at https://herald.jaaaames.com. No auth (single user
 
 ## Common commands
 
-All commands run from `/home/james/srv/herald`. The unified CLI is `herald_digest.py`. Tests use a throwaway DB at `/tmp/herald-test/` so they never touch the live `/var/lib/herald/herald.db`.
+Development commands run from `/home/james/src/herald`. Production runs from
+a root-owned, versioned release below `/usr/local/lib/herald`; never edit that
+release in place. The unified CLI is `herald_digest.py`. Tests use throwaway
+databases below `/tmp` so they never touch `/var/lib/herald/herald.db`.
 
 ```bash
 # Manual collect (bird → parse → context-enrich → image-enrich → ingest)
@@ -38,7 +41,13 @@ ssh optiplex "sqlite3 /var/lib/herald/herald.db \"SELECT step, status, COUNT(*) 
 
 ## Environment
 
-`herald_env.py` is a **whitelist-based** loader for `~/.config/herald/.env` (chmod 600). It uses `os.environ.setdefault` — values already in the parent env (systemd `EnvironmentFile=`, interactive `export`) win. The whitelist lives at the top of `herald_env.py` (`LOAD_KEYS`); **add new `HERALD_*` knobs there** or they won't load.
+`herald_env.py` is a **whitelist-based** optional loader. Production values
+come from the mutually restricted systemd environment files
+`/etc/herald/web.env` and `/etc/herald/worker.env`; values already in the parent
+environment win because the loader uses `os.environ.setdefault`. For manual
+development, explicitly set `HERALD_ENV_PATH` to a private file outside Git.
+The whitelist lives at the top of `herald_env.py` (`LOAD_KEYS`); **add new
+`HERALD_*` knobs there** or they will not load from such a file.
 
 Common knobs (full table in README.md):
 

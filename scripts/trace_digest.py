@@ -12,7 +12,9 @@ Usage: python3 trace_digest.py [digest_id]
 import json
 import re
 import sys
-sys.path.insert(0, "/home/james/srv/herald")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import herald_db
 
