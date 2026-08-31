@@ -1,39 +1,34 @@
 {% extends "base.html" %}
-{% block title %}herald — latest digests{% endblock %}
+{% block title %}herald — latest issues{% endblock %}
 {% block content %}
 
 <div class="cover">
-  <h1>latest digests</h1>
+  <h1>latest issues</h1>
   <div class="cover-meta">
-    <span>{{ digests|length }} digest{{ '' if digests|length == 1 else 's' }} on file</span>
-    <span>twice daily &middot; 06:00 / 14:00 AEST</span>
+    <span>{{ issues|length }} published issue{{ '' if issues|length == 1 else 's' }} on file</span>
+    <span>assembled from the timeline, on demand</span>
   </div>
 </div>
 
-{% if digests %}
+{% if issues %}
 <div class="digest-list">
-  {% for d in digests %}
-  <a class="digest-card" href="{{ url_for('digest', digest_id=d.id) }}">
+  {% for issue in issues %}
+  <a class="digest-card" href="{{ url_for('issue', issue_id=issue.id) }}">
     <div class="digest-card-head">
-      <span class="digest-card-title">
-        digest #{{ d.id }} &middot;
-        {% if d.window_hours %}{{ '%g'|format(d.window_hours) }}h window{% else %}{{ ts(d.period_start) }} → {{ ts(d.period_end) }}{% endif %}
-      </span>
-      <span class="digest-card-ago">{{ d.generated_ago }}</span>
+      <span class="digest-card-title">{{ issue.title or ('issue #' ~ issue.id) }}</span>
+      <span class="digest-card-ago">{{ issue.published_ago }}</span>
     </div>
     <div class="digest-card-meta">
-      <span><strong>{{ d.story_count }}</strong> stor{{ 'y' if d.story_count == 1 else 'ies' }}</span>
-      <span><strong>{{ d.input_count }}</strong> candidate post{{ '' if d.input_count == 1 else 's' }}</span>
-      {% if d.cost_usd %}<span><strong>${{ '%.4f'|format(d.cost_usd) }}</strong> via {{ d.model or '?' }}</span>{% endif %}
-      {% if d.tokens_in %}<span>{{ "{:,}".format(d.tokens_in) }} in / {{ "{:,}".format(d.tokens_out) }} out tokens</span>{% endif %}
+      <span><strong>{{ issue.item_count }}</strong> stor{{ 'y' if issue.item_count == 1 else 'ies' }}</span>
+      <span>published {{ issue.published_str }}</span>
     </div>
   </a>
   {% endfor %}
 </div>
 {% else %}
 <div class="empty">
-  <h3>no digests yet</h3>
-  <p>Run <code>python3 /home/james/srv/herald/herald_digest.py digest --since "12h ago"</code> on optiplex to generate the first one.</p>
+  <h3>no issues published yet</h3>
+  <p>Herald publishes reviewed, on-demand issues from the timeline.</p>
 </div>
 {% endif %}
 

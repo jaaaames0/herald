@@ -2,20 +2,15 @@
 """
 collect.py — Herald's collector layer.
 
-Reads raw `bird home --json-full` output (a JSON array), resolves retweets by
-fetching originals via `bird read`, applies the age gate to drop ads, and
-outputs a unified JSON array of "real" tweets ready for the parser.
+Reads raw `bird home --json-full` output (a JSON array), applies the age gate
+to drop ads, unwraps retweets from the inline card payload, and outputs the
+observed timeline for the parser.
 
 The collector is the only layer that knows about bird; parser.py is
 pure data transformation with no bird dependencies.
 
-Why RTs go through `bird read`:
-  Bird's `home --json-full` wrapper for RTs truncates the original text and
-  buries the full text deep in `_raw.legacy.retweeted_status_result.result.note_tweet.note_tweet_results.result.text`
-  — fragile, version-dependent. Re-fetching the original via `bird read <id> --json-full`
-  returns it as a first-class tweet with normal structure. We don't care who
-  retweeted (we just know someone we follow did, which is enough vetting
-  signal). All context lives in the original.
+Retweets are unwrapped locally from Bird's inline original payload. This avoids
+an additional X request while retaining the person who amplified the post.
 
 Why the age gate:
   X surfaces promoted/ad tweets with old `createdAt` (days/weeks). The user's
@@ -24,14 +19,13 @@ Why the age gate:
   near zero because the collector pulls only the most recent tweets.
 
 Auth:
-  bird requires Twitter auth_token + ct0 cookies. The collector sources them
-  from `~/.config/herald/.env` if AUTH_TOKEN is not already in the environment.
-  This makes the collector work uniformly from interactive shell, SSH,
-  systemd, and cron contexts. The .env file should be chmod 600.
+  bird requires Twitter auth_token + ct0 cookies. Production supplies them
+  through the protected worker EnvironmentFile. For manual development,
+  explicitly point HERALD_ENV_PATH at a private file outside Git.
 
 Usage:
     bird home -n 75 --following --json-full | collect.py > unified.json
-    collect.py test_tweets.json > unified.json
+    collect.py test_data/tweets_23072026.json > unified.json
 """
 
 import json
@@ -80,6 +74,60 @@ def get_original_tweet_id(tweet):
     legacy = raw.get("legacy") or {}
     rs = (legacy.get("retweeted_status_result") or {}).get("result") or {}
     return rs.get("rest_id")
+
+
+def _result_to_tweet(result, observed_at, amplified_by):
+    """Turn Bird's nested GraphQL Tweet result into the normal top-level shape.
+
+    ``bird home`` includes the original of a retweet inline.  Reading it here
+    avoids an extra X request and, unlike the wrapper text, retains Note Tweet
+    long-form text, the original author, media, links, and quoted tweet data.
+    ``observed_at`` intentionally remains the wrapper's timeline time: this
+    represents when the user saw the post, not when its author first posted it.
+    """
+    legacy = result.get("legacy") or {}
+    user = ((result.get("core") or {}).get("user_results") or {}).get("result") or {}
+    user_core = user.get("core") or {}
+    original_id = result.get("rest_id") or legacy.get("id_str")
+    if not original_id:
+        return None
+    author = {
+        "id": user.get("rest_id") or legacy.get("user_id_str") or "",
+        "username": user_core.get("screen_name", ""),
+        "name": user_core.get("name", ""),
+    }
+    quoted = ((result.get("quoted_status_result") or {}).get("result"))
+    return {
+        "id": str(original_id),
+        "text": legacy.get("full_text") or "",
+        "createdAt": observed_at or legacy.get("created_at") or "",
+        "likeCount": legacy.get("favorite_count", 0) or 0,
+        "retweetCount": legacy.get("retweet_count", 0) or 0,
+        "replyCount": legacy.get("reply_count", 0) or 0,
+        "quoteCount": legacy.get("quote_count", 0) or 0,
+        "conversationId": legacy.get("conversation_id_str") or str(original_id),
+        "inReplyToStatusId": legacy.get("in_reply_to_status_id_str") or None,
+        "author": author,
+        "quotedTweet": _result_to_tweet(quoted, observed_at, None) if quoted else None,
+        "_raw": result,
+        "amplified_by": amplified_by,
+        "original_created_at": legacy.get("created_at") or None,
+    }
+
+
+def unwrap_retweet(tweet):
+    """Return an inline original plus amplification provenance, if available."""
+    raw = tweet.get("_raw") or {}
+    legacy = raw.get("legacy") or {}
+    result = ((legacy.get("retweeted_status_result") or {}).get("result"))
+    if not result:
+        return tweet
+    wrapper_author = tweet.get("author") or {}
+    amplified_by = {
+        "id": wrapper_author.get("id", ""), "username": wrapper_author.get("username", ""),
+        "name": wrapper_author.get("name", ""),
+    }
+    return _result_to_tweet(result, tweet.get("createdAt") or tweet.get("created_at"), amplified_by) or tweet
 
 
 def resolve_retweet(tweet_id, timeout=30):
@@ -136,27 +184,13 @@ def main():
         tweets = [tweets]
 
     resolved = []
-    rt_resolved_count = 0
-    rt_failed_count = 0
     age_dropped_count = 0
     age_unknown_kept = 0
 
     for t in tweets:
         tweet = t
 
-        # 1. Resolve RTs by fetching the original via bird read
-        if is_retweet(t):
-            orig_id = get_original_tweet_id(t)
-            if orig_id:
-                original = resolve_retweet(orig_id)
-                if original:
-                    tweet = original
-                    rt_resolved_count += 1
-                else:
-                    # Resolution failed — fall through to age gate on the wrapper
-                    rt_failed_count += 1
-
-        # 2. Apply age gate (on the possibly-resolved tweet)
+        # Apply the age gate without making additional X requests.
         if not passes_age_gate(tweet):
             age_dropped_count += 1
             continue
@@ -164,12 +198,29 @@ def main():
         if not parse_twitter_date(tweet.get("createdAt") or tweet.get("created_at")):
             age_unknown_kept += 1
 
-        resolved.append(tweet)
+        resolved.append(unwrap_retweet(tweet) if is_retweet(tweet) else tweet)
+
+    # The requested count alone cannot tell us whether a cadence is covering
+    # the feed: Bird normally returns exactly that many cards.  The observed
+    # age span can.  A four-hour timer whose retained cards consistently reach
+    # well past four hours has overlap; one that bottoms out below four hours
+    # is clipping the timeline and needs a larger page or a shorter cadence.
+    observed_ages = []
+    now = datetime.now(timezone.utc)
+    for tweet in resolved:
+        created = parse_twitter_date(tweet.get("createdAt") or tweet.get("created_at"))
+        if created:
+            observed_ages.append(max(0.0, (now - created).total_seconds() / 60.0))
+    coverage = "coverage_age_min=unknown"
+    if observed_ages:
+        coverage = (
+            f"coverage_age_min={min(observed_ages):.1f}..{max(observed_ages):.1f}"
+        )
 
     print(
-        f"[collect] input={len(tweets)} rt_resolved={rt_resolved_count} "
-        f"rt_failed={rt_failed_count} age_dropped={age_dropped_count} "
-        f"age_unknown_kept={age_unknown_kept} output={len(resolved)}",
+        f"[collect] input={len(tweets)} retweets_unwrapped="
+        f"{sum(1 for t in tweets if is_retweet(t))} age_dropped={age_dropped_count} "
+        f"age_unknown_kept={age_unknown_kept} output={len(resolved)} {coverage}",
         file=sys.stderr,
     )
     print(json.dumps(resolved, ensure_ascii=False))

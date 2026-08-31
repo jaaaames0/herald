@@ -7,8 +7,13 @@
   <div class="cover-meta">
     <span><strong>window</strong> {{ d.period_start_str }} → {{ d.period_end_str }}{% if d.window_hours %} ({{ '%g'|format(d.window_hours) }}h){% endif %}</span>
     <span><strong>generated</strong> {{ d.generated_str }}</span>
+    {% if d.edition_meta %}
+    <span><strong>timeline cards</strong> {{ d.edition_meta.shown }}</span>
+    <span><strong>captured</strong> {{ d.edition_meta.captured }}</span>
+    {% else %}
     <span><strong>stories</strong> {{ d.stories|length }}</span>
     {% if d.input_post_ids %}<span><strong>candidates</strong> {{ d.input_post_ids|length }} post{{ '' if d.input_post_ids|length == 1 else 's' }}</span>{% endif %}
+    {% endif %}
   </div>
   {% if d.model_versions %}
   <div class="cover-meta" style="margin-top: 0.4rem;">
@@ -16,6 +21,54 @@
   </div>
   {% endif %}
 </div>
+
+{% if d.edition_meta %}
+<div class="section">
+  <span class="section-label">front page · selected from your timeline</span>
+  {% if d.edition_clusters %}
+  <div class="themes">
+    {% for c in d.edition_clusters %}
+    <div class="theme"><div class="theme-label">{{ c.label }}</div>{% if c.note %}<div class="theme-desc">{{ c.note }}</div>{% endif %}</div>
+    {% endfor %}
+  </div>
+  {% else %}<div class="section-sub">No editorial grouping was needed for this window.</div>{% endif %}
+</div>
+
+{% if d.research_brief %}
+<div class="section">
+  <span class="section-label">what happened · researched separately from X</span>
+  <article class="story">
+    <div class="story-head"><span class="story-headline">{{ d.research_brief.lead_label }}</span></div>
+    <div class="story-body">{{ d.research_brief.body_html|safe }}</div>
+    <div class="sources"><div class="sources-label">external research sources</div>
+    {% for source in d.research_brief.sources %}<div class="source"><a href="{{ source.url }}" target="_blank" rel="noopener">[source:{{ loop.index }}] {{ source.title or source.url }}</a>{% if source.excerpt %}<div class="source-text">{{ source.excerpt }}</div>{% endif %}</div>{% endfor %}
+    </div>
+  </article>
+</div>
+{% endif %}
+
+<div class="section">
+  <span class="section-label">your timeline · direct posts</span>
+  <div class="stories">
+  {% for card in d.edition_cards %}
+  <article class="story {% if card.section == 'front' %}story-item{% endif %}">
+    <div class="source-head"><span class="source-author">@{{ card.author_handle or '?' }}</span><span class="source-time">{{ card.created_str }}</span><a class="source-id" href="https://x.com/i/web/status/{{ card.external_id }}" target="_blank" rel="noopener">[{{ card.external_id[:10] }}…]</a></div>
+    {% if card.post_type == 'retweet' and card.amplified_by %}<div class="story-angle">amplified by @{{ card.amplified_by.username or card.author_handle }}</div>{% endif %}
+    <div class="story-body"><p>{{ card.text }}</p></div>
+    {% if card.context_posts %}<div class="sources"><div class="sources-label">fetched context</div>{% for context in card.context_posts %}<div class="source"><span class="source-author">@{{ context.author or '?' }}</span> <a href="https://x.com/i/web/status/{{ context.id }}" target="_blank" rel="noopener">[{{ context.id[:10] }}…]</a><div class="source-text">{{ context.text }}</div></div>{% endfor %}</div>{% endif %}
+    {% if card.metrics_str %}<div class="source-metrics">{{ card.metrics_str }}</div>{% endif %}
+  </article>
+  {% endfor %}
+  </div>
+</div>
+
+<div class="section">
+  <span class="section-label">coverage ledger</span>
+  <div class="cover-meta">
+    <span><strong>captured</strong> {{ d.edition_meta.captured }}</span><span><strong>unique</strong> {{ d.edition_meta.unique }}</span><span><strong>shown</strong> {{ d.edition_meta.shown }}</span><span><strong>collapsed / omitted</strong> {{ d.edition_meta.collapsed_or_omitted }}</span><span><strong>context reads</strong> {{ d.edition_meta.context_reads }}/12</span><span><strong>research</strong> {{ d.edition_meta.research }}</span>
+  </div>
+</div>
+{% else %}
 
 {# ─── ZEITGEIST ─── #}
 {% if d.zeitgeist %}
@@ -105,5 +158,7 @@
 <p style="margin-top: 3rem; color: var(--muted); font-size: 0.72rem;">
   <a href="{{ url_for('index') }}">← all digests</a>
 </p>
+
+{% endif %}
 
 {% endblock %}

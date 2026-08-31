@@ -2,14 +2,15 @@
 """
 parser.py — Parse and normalise tweets for Herald.
 
-Input: unified JSON array on stdin (output of collect.py — RTs already
-       resolved, age-gate applied). The parser is a pure data transformation
+Input: unified JSON array on stdin (output of collect.py — RTs locally
+       unwrapped, age-gate applied). The parser is a pure data transformation
        with no bird dependencies.
 
 Output: JSONL — one normalised tweet per line.
 
 Source-agnostic schema: every entry has `post_type` ∈ {original, reply, quote}.
-The collector resolves retweets upstream, so this parser never sees an RT.
+The collector unwraps retweets into their original post and preserves the
+account that amplified it in `amplified_by`.
 
 Three fixes vs the prior newsroom iteration's bird_parse.py:
   1. parse_author: fall back to _raw.core.user_results.result.rest_id when
@@ -28,6 +29,7 @@ Phase 3 source collectors can map other platforms' concepts (e.g., Mastodon
 """
 
 import json
+import re
 import sys
 
 
@@ -200,12 +202,16 @@ def parse_media(tweet, legacy):
 def parse_links(tweet, legacy):
     """Extract links array — expanded URLs (resolved from t.co) when available."""
     items = legacy.get("entities", {}).get("urls") or []
-    if not items:
-        return None
     links = []
     for lnk in items:
         url = lnk.get("expanded_url") or lnk.get("url")
         if url:
+            links.append(url)
+    # Nested retweet/Note Tweet payloads can omit entities while retaining a
+    # t.co URL in their full text. Keep it: urllib will follow the redirect
+    # during the selected-story evidence pass.
+    for url in re.findall(r"https?://t\.co/[A-Za-z0-9]+", get_tweet_text(tweet)):
+        if url not in links:
             links.append(url)
     return links if links else None
 
@@ -213,7 +219,7 @@ def parse_links(tweet, legacy):
 def parse_tweet(tweet):
     """Parse a single tweet dict from bird --json-full into a normalised entry.
 
-    No RT handling here — the collector resolves RTs upstream.
+    Retweet wrappers are normally unwrapped by the collector before this point.
     """
     raw = tweet.get("_raw") or {}
     legacy = raw.get("legacy") or {}
@@ -223,8 +229,12 @@ def parse_tweet(tweet):
     text = get_tweet_text(tweet)
     has_quoted = bool(tweet.get("quotedTweet"))
     is_reply = bool(tweet.get("inReplyToStatusId"))
+    raw_legacy = raw.get("legacy") or {}
+    is_retweet = text.startswith("RT @") or bool((raw_legacy.get("retweeted_status_result") or {}).get("result"))
 
-    if has_quoted:
+    if is_retweet:
+        post_type = "retweet"
+    elif has_quoted:
         post_type = "quote"
     elif is_reply:
         post_type = "reply"
@@ -245,6 +255,7 @@ def parse_tweet(tweet):
         "lang":            legacy.get("lang") or tweet.get("lang"),
         "source":          legacy.get("source") or tweet.get("source"),
         "post_type":       post_type,
+        "amplified_by":    tweet.get("amplified_by") or (author if is_retweet else None),
     }
 
 

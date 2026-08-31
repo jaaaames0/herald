@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ issue.title or ('issue #' ~ issue.id) }} — herald{% endblock %}
+{% block content %}
+<div class="cover">
+  <h1>{{ issue.title or ('issue #' ~ issue.id) }}</h1>
+  <div class="cover-meta"><span>{{ issue['items']|length }} stories</span><span>published {{ issue.published_str }}</span></div>
+</div>
+
+<div class="section"><span class="section-label">the timeline, distilled</span><div class="stories">
+{% for item in issue['items'] %}
+<article class="story">
+  <div class="story-head"><span class="story-num">{{ item.position }}.</span><span class="story-headline">{{ item.headline or item.anchor }}</span></div>
+  {% if item.continuity_parent_id or item.continuity_note %}<div class="story-angle">continuing coverage{% if item.continuity_parent_id %} · previous issue context retained{% endif %}{% if item.continuity_note %}: {{ item.continuity_note }}{% endif %}</div>{% endif %}
+  <div class="story-body">{{ item.story_html|safe }}</div>
+</article>
+{% endfor %}
+</div></div>
+{% endblock %}

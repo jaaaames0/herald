@@ -29,26 +29,85 @@ Why a reasoning model matters here:
 """
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = os.environ.get("HERALD_MODEL", "openai/gpt-oss-120b")
-# Caps are set well above any plausible output (OpenRouter's context window
-# for gpt-oss-120b is 128K). A short run hitting the cap is a real signal
-# that the model is rambling — finish_reason="length" shows up in pipeline_runs.
-# Set to 0 to disable entirely (OpenRouter will use the model default).
-STAGE1_MAX_TOKENS = int(os.environ.get("HERALD_STAGE1_MAX_TOKENS", "64000"))
-STAGE2_MAX_TOKENS = int(os.environ.get("HERALD_STAGE2_MAX_TOKENS", "64000"))
+STAGE1_MODEL = os.environ.get("HERALD_EDITOR_MODEL", DEFAULT_MODEL)
+STAGE2_MODEL = os.environ.get("HERALD_WRITER_MODEL", DEFAULT_MODEL)
+# These are editorial output budgets, not context-window limits.  A digest
+# should fail visibly and cheaply before a reasoning model spends 64k tokens
+# wandering toward JSON.  Operators may override them in the environment.
+def _bounded_int(name, default, maximum):
+    """Accept operator tuning without permitting an accidental 64k runaway."""
+    try:
+        return min(int(os.environ.get(name, str(default))), maximum)
+    except ValueError:
+        return default
+
+
+def parse_json_response(content):
+    """Parse a provider response, tolerating a harmless ```json wrapper."""
+    text = (content or "").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError as original_error:
+        # Some providers emit valid top-level fields but forget to escape a
+        # quotation mark inside long prose. Recover only the unambiguous
+        # headline/story/topic framing; normal citation and quote validation
+        # still runs in stage2_story before anything can be published.
+        headline_match = re.search(
+            r'"headline"\s*:\s*"(?P<head>(?:\\.|[^"\\])*)"\s*,\s*"story"\s*:', text, re.DOTALL,
+        )
+        story_match = re.search(
+            r'"story"\s*:\s*"(?P<story>.*)"\s*,\s*"topic"\s*:\s*"(?P<topic>(?:\\.|[^"\\])*)"',
+            text, re.DOTALL,
+        )
+        if not headline_match or not story_match:
+            raise original_error
+
+        def loose_string(value):
+            # Decode standard escaped sequences where possible, but preserve
+            # the unescaped prose quotes that caused the original failure.
+            try:
+                return json.loads('"' + value + '"', strict=False)
+            except json.JSONDecodeError:
+                return (value.replace('\\"', '"').replace('\\n', '\n')
+                        .replace('\\t', '\t').replace('\\\\', '\\'))
+
+        recovered = {
+            "headline": loose_string(headline_match.group("head")),
+            "story": loose_string(story_match.group("story")),
+            "topic": loose_string(story_match.group("topic")),
+            "key_quotes": [],
+            "_parse_recovered": "malformed provider JSON; recovered top-level prose fields",
+        }
+        return recovered
+
+
+STAGE1_MAX_TOKENS = _bounded_int("HERALD_STAGE1_MAX_TOKENS", 6000, 8000)
+STAGE2_MAX_TOKENS = _bounded_int("HERALD_STAGE2_MAX_TOKENS", 2600, 4000)
 
 # Reasoning-token caps (Phase 3.8.1 fix). Reasoning models (gpt-oss-120b) otherwise
 # burn the full max_tokens budget on chain-of-thought and emit empty JSON. Without
 # these caps, digest 32 (2026-07-10 morning) produced `{"final{"` plus whitespace
 # at finish_reason=length, costing $0.025 for nothing. Defaults: stage 1 = 4000,
 # stage 2 = 2000. Override via env if you need different ceilings.
-STAGE1_MAX_REASONING_TOKENS = int(os.environ.get("HERALD_STAGE1_MAX_REASONING_TOKENS", "4000"))
-STAGE2_MAX_REASONING_TOKENS = int(os.environ.get("HERALD_STAGE2_MAX_REASONING_TOKENS", "2000"))
+# OpenRouter's current API controls gpt-oss reasoning with ``reasoning.effort``.
+# The older top-level max_reasoning_tokens field is ignored by providers for this
+# model, which is why a nominal 700-token cap still consumed 1,797 tokens.
+STAGE1_REASONING_EFFORT = os.environ.get("HERALD_STAGE1_REASONING_EFFORT", "low")
+STAGE2_REASONING_EFFORT = os.environ.get("HERALD_STAGE2_REASONING_EFFORT", "low")
+# Compatibility selectors for existing callers. These numbers are no longer
+# sent to OpenRouter as token caps; see _call above.
+STAGE1_MAX_REASONING_TOKENS = 700
+STAGE2_MAX_REASONING_TOKENS = 600
 
 def _render_context_block(context_posts, max_chars=600):
     """Render an optional list of context posts (parsed tweet dicts) as a compact
@@ -171,9 +230,9 @@ def _call(messages, model=None, max_tokens=STAGE2_MAX_TOKENS, max_reasoning_toke
           temperature=TEMPERATURE, timeout=180):
     """One-shot OpenRouter chat call. Returns (content_str, usage_dict, model_used, finish_reason).
 
-    max_reasoning_tokens: optional int. Caps reasoning-model exploration. Without a cap
-    (`None` = model decides), gpt-oss-120b can burn the full max_tokens budget on
-    reasoning and emit empty / partial JSON. Set per stage as needed.
+    ``max_reasoning_tokens`` is retained for caller compatibility. For gpt-oss
+    OpenRouter now accepts an effort setting instead; Stage 1 and Stage 2 pass
+    their respective low-effort settings below.
     """
     model = model or DEFAULT_MODEL
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -187,7 +246,8 @@ def _call(messages, model=None, max_tokens=STAGE2_MAX_TOKENS, max_reasoning_toke
         "response_format": {"type": "json_object"},
     }
     if max_reasoning_tokens is not None:
-        payload["max_reasoning_tokens"] = max_reasoning_tokens
+        effort = STAGE1_REASONING_EFFORT if max_reasoning_tokens == STAGE1_MAX_REASONING_TOKENS else STAGE2_REASONING_EFFORT
+        payload["reasoning"] = {"effort": effort, "exclude": True}
     req = urllib.request.Request(
         OPENROUTER_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -234,9 +294,9 @@ items; your job is to identify WHAT to cover and at WHAT shape.
 
 You are the editor, not a formatter. You decide what's worth covering today, at what depth,
 in what form. If today genuinely has only three angles, three stories is the right answer.
-If today has twenty distinct things worth surfacing, surface all twenty — pick the right
-shape for each (story, item, or skip entirely). Don't pad; don't artificially broaden to
-hit a count; don't suppress to seem tidy. Cover what the timeline actually has.
+The finished issue has room for at most 12 entries. Choose the best 3–6 stories and at most
+6 items; skip the rest. Don't pad or artificially broaden to hit a count. Coverage is a
+judgement, not an inventory of every candidate.
 
 Two coverage shapes available to you:
 
@@ -251,11 +311,11 @@ Two coverage shapes available to you:
 
 Read every post. Then produce a JSON object (no markdown fences, no preamble) with these keys:
 
-  zeitgeist: array of 3-7 theme objects — the clusters where multi-post stories make sense.
-    Each: {label: short label (≤4 words), description: 1-2 sentence summary,
+  zeitgeist: array of 0-6 theme objects — the clusters where multi-post stories make sense.
+    Each: {label: short label (≤4 words), description: one short sentence,
            post_ids: [array of cited post IDs], accounts: [unique author handles contributing],
            salience: "high" | "medium" | "low", why_it_matters: 1 sentence explaining
-           editorial relevance}.
+           editorial relevance, ≤18 words}.
 
   stories_to_write: array of theme labels (subset of zeitgeist) that should be turned into
                     stories, ordered by importance. For each: {label, angle: 1 sentence on
@@ -268,13 +328,15 @@ Read every post. Then produce a JSON object (no markdown fences, no preamble) wi
      kind: your own tag — 'news', 'humor', 'quote', 'meme', 'off-beat', 'link', 'sidebar',
            'observation', 'thread-anchor', whatever fits. kind is for the writer's framing,
            not a constraint.}
-    Pick 0-N items. The number is whatever the timeline earns. If a candidate didn't form
+    Pick 0-6 items. ``why`` may describe only what the post itself establishes;
+    do not call it viral, Australian, merchandise, a reaction, or a broader trend
+    unless the post says so. If a candidate didn't form
     a theme but is still worth surfacing (high engagement, off-beat, a clean one-tweet
     news hit, a sharp joke), put it here. If today's themes already cover everything
     interesting, omit items entirely. Items and stories are independent — you can have
     items without stories, stories without items, both, or neither.
 
-  editor_notes: OPTIONAL 1-3 sentence paragraph from you to the writers (stage 2). Set the
+  editor_notes: OPTIONAL one short sentence to the writers (stage 2). Set the
                 tone for today's digest: what's the dominant register (urgent news cycle?
                 quiet day? comedy-leaning? tech release day?). What to lean into. What to
                 skip. The writers will use this as direction, not as a hard rule.
@@ -286,6 +348,10 @@ Hard constraints:
 - No fabrication. If the posts don't establish something, don't say it.
 - Synthesis ACROSS posts is the whole point for stories — name multiple accounts and posts
   when they corroborate. For items, one post_id per item is the rule.
+- A story needs one specific shared event, argument, or cultural moment. Never make a broad
+  sector roundup: a lawsuit, a security anecdote, and an unrelated political post are separate
+  items, not "AI legal and safety fallout". If the common subject needs a vague category label,
+  do not make a story.
 - 'Salience' is YOUR editorial judgement, not just engagement. A low-engagement post that
   surfaces a substantive argument can be high salience. A high-engagement post that's empty
   chatter is low. Same logic for items — engagement is a hint, not the criterion.
@@ -349,7 +415,7 @@ def stage1_timeline_map(candidate_posts, window_hours=12, model=None, dry_run=Fa
     user = "\n\n".join(user_parts)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     content, usage, model_used, finish_reason = _call(
-        messages, model=model,
+        messages, model=model or STAGE1_MODEL,
         max_tokens=STAGE1_MAX_TOKENS,
         max_reasoning_tokens=STAGE1_MAX_REASONING_TOKENS,
     )
@@ -357,20 +423,89 @@ def stage1_timeline_map(candidate_posts, window_hours=12, model=None, dry_run=Fa
     # Parse; best-effort. Carry finish_reason forward so the DB row preserves
     # the diagnostic (length vs error vs content_filter vs etc.).
     try:
-        obj = json.loads(content)
+        # Some otherwise excellent writers emit literal newlines in JSON
+        # string fields. OpenRouter returns the content intact; strict=False
+        # accepts those control characters without weakening our citation and
+        # quote validation below.
+        obj = parse_json_response(content)
     except json.JSONDecodeError:
         obj = {
             "_parse_warning": "model returned non-JSON",
             "_raw": content[:1000],
             "_finish_reason": finish_reason,
         }
+    obj = _normalise_timeline_map(obj)
+    # A 27-token `{ "zeitgeist:": [] ... }` response is a provider/model
+    # hiccup, not an editorial decision to publish nothing. Retry once with a
+    # terse repair instruction, then use an honest extractive fallback.
+    if not _timeline_map_has_coverage(obj):
+        repair_messages = messages + [{"role": "user", "content": (
+            "Your previous map selected nothing. Return valid JSON with 3-6 concrete items or stories "
+            "from the supplied post IDs. Do not use keys ending in a colon."
+        )}]
+        retry_content, retry_usage, retry_model, retry_finish = _call(
+            repair_messages, model=model or STAGE1_MODEL, max_tokens=STAGE1_MAX_TOKENS,
+            max_reasoning_tokens=STAGE1_MAX_REASONING_TOKENS,
+        )
+        try:
+            retry_obj = _normalise_timeline_map(parse_json_response(retry_content))
+        except json.JSONDecodeError:
+            retry_obj = {}
+        usage = _combine_usage(usage, retry_usage)
+        model_used, finish_reason = retry_model, retry_finish
+        content = content + "\n\nRETRY:\n" + retry_content
+        obj = retry_obj if _timeline_map_has_coverage(retry_obj) else _fallback_timeline_map(candidate_posts)
+        if not _timeline_map_has_coverage(retry_obj):
+            obj["_parse_warning"] = "stage 1 returned no usable coverage; extractive fallback used"
+
     # Also annotate if finish_reason itself is the problem (e.g. finish=error
     # with empty content — JSON parse would "succeed" against "" and give {})
     if finish_reason != "stop" and not obj.get("_parse_warning"):
         obj["_finish_reason"] = finish_reason
+    # The caller persists this in a private local dossier, not the public
+    # digest row. It is the difference between tuning a prompt from evidence
+    # and guessing what the model actually returned.
+    obj["_raw_output"] = content
 
 
     return obj, usage, model_used, finish_reason
+
+
+def _normalise_timeline_map(obj):
+    """Tolerate harmless JSON key typos, never malformed selection data."""
+    if not isinstance(obj, dict):
+        return {}
+    out = {str(key).rstrip(":"): value for key, value in obj.items()}
+    for key in ("zeitgeist", "stories_to_write", "items"):
+        if not isinstance(out.get(key), list):
+            out[key] = []
+    out["editor_notes"] = str(out.get("editor_notes") or "")
+    return out
+
+
+def _timeline_map_has_coverage(obj):
+    return bool((obj or {}).get("stories_to_write") or (obj or {}).get("items"))
+
+
+def _fallback_timeline_map(posts):
+    """Never leave a non-empty timeline with a blank digest after model failure."""
+    def score(post):
+        metrics = post.get("metrics") or {}
+        return int(metrics.get("likes") or 0) + 2 * int(metrics.get("retweets") or 0) + int(metrics.get("replies") or 0)
+    picks = sorted(posts, key=score, reverse=True)[:6]
+    return {
+        "zeitgeist": [], "stories_to_write": [],
+        "items": [{"post_id": post["id"], "kind": "timeline", "why": "Selected extractively after editor failure."}
+                  for post in picks],
+        "editor_notes": "Source-first fallback.",
+    }
+
+
+def _combine_usage(first, second):
+    out = dict(first or {})
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cost"):
+        out[key] = (first or {}).get(key, 0) + (second or {}).get(key, 0)
+    return out
 
 
 # -------- Stage 2: per-theme story --------
@@ -382,10 +517,18 @@ The editor also decides the scope — see SCOPE below.
 
 SOURCE-GROUNDING RULES (HARD CONSTRAINTS):
 1. Every factual claim MUST cite a source post inline as [post:ID], where ID is the post's `id`
-   from the POSTS block. No bare assertions.
+   from the POSTS block. No bare assertions. A post reporting an event is a report or claim,
+   not independent proof: write "X reported/argued/posted" when the supplied evidence does not
+   establish the fact itself.
 2. Direct quotes must be embedded verbatim with attribution: "quoted text" — @author.
 3. Paraphrasing is fine. Fabrication is not. If the posts don't establish something, don't say it.
 4. Don't repeat information already established by an earlier cited post — chain citations cleanly.
+5. Do not make a broad story merely because posts share a subject. The supplied posts must have a
+   concrete common event, argument, or cultural moment. Otherwise keep the entry narrow.
+6. Do not add social proof such as "viral", "widely shared", "the timeline erupted", or a claim
+   about what "the debate is really about" unless the supplied posts themselves establish it.
+   Attribute contested framing to the person or posts making it; do not turn it into the narrator's
+   verdict.
 
 Output a JSON object (no markdown fences, no preamble) with keys:
   headline: short string ≤ 90 chars, captures the entry.
@@ -469,7 +612,7 @@ HERALD_LINK_MAX_CHARS_RENDER = int(os.environ.get("HERALD_LINK_MAX_CHARS_RENDER"
 
 
 def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None,
-                 editor_notes=None, model=None, dry_run=False):
+                 editor_notes=None, model=None, dry_run=False, source_roles=None):
     """Stage 2: write a story for one theme.
 
     theme_label: the theme's label from the timeline map.
@@ -504,6 +647,7 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
             "text": (p.get("text") or "")[:1500],
             "metrics": p.get("metrics") or {},
             "links": p.get("links") or [],
+            "role": (source_roles or {}).get(str(p.get("id"))) or p.get("desk_role") or "source",
         })
     angle_line = f"\nFraming angle (from the timeline map): {angle}" if angle else ""
     context_line = f"\nTimeline context: {timeline_map_summary}" if timeline_map_summary else ""
@@ -535,7 +679,7 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
     user_parts = [
         f"THEME: {theme_label}{angle_line}{context_line}",
         f"SCOPE: {len(posts_serialised)} source post(s).{editor_notes_line}",
-        f"POSTS ({len(posts_serialised)}):\n{json.dumps(posts_serialised, ensure_ascii=False)}",
+        f"POSTS ({len(posts_serialised)}; each includes an editorial role):\n{json.dumps(posts_serialised, ensure_ascii=False)}",
     ]
     if context_block:
         user_parts.append(context_block)
@@ -547,12 +691,15 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
     user = "\n\n".join(user_parts)
     messages = [{"role": "system", "content": STAGE2_SYSTEM}, {"role": "user", "content": user}]
     content, usage, model_used, finish_reason = _call(
-        messages, model=model,
+        messages, model=model or STAGE2_MODEL,
         max_reasoning_tokens=STAGE2_MAX_REASONING_TOKENS,
     )
 
     try:
-        obj = json.loads(content)
+        # Claude-family models may place literal newlines in the prose string.
+        # They remain structurally valid for Herald once parsed non-strictly;
+        # all citations and quotes are still checked below.
+        obj = parse_json_response(content)
     except json.JSONDecodeError:
         obj = {
             "headline": f"Story on {theme_label}",
@@ -572,8 +719,21 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
         obj["headline"] = obj.get("headline") or f"Story on {theme_label}"
         obj["story"] = obj.get("story") or f"[stage 2 produced no story body for theme '{theme_label}' — see pipeline_runs for finish_reason]"
 
+    _citations_ok, bad_citations = _validate_story_citations(obj.get("story"), theme_posts)
+    if bad_citations:
+        # A citation-looking string is worse than no prose: it gives a
+        # fabricated assertion the appearance of sourcing. Preserve raw model
+        # output in the dossier, but fall back to the selected source itself.
+        first = theme_posts[0] if theme_posts else {}
+        obj["_citation_rejections"] = bad_citations
+        obj["story"] = f"{first.get('text') or ''} [post:{first.get('id') or ''}]"
+
     obj.setdefault("topic", "")
-    obj.setdefault("key_quotes", [])
+    valid_quotes, rejected_quotes = _validate_key_quotes(obj.get("key_quotes"), theme_posts)
+    obj["key_quotes"] = valid_quotes
+    if rejected_quotes:
+        # Stored in the private dossier by herald_digest, never rendered.
+        obj["_quote_rejections"] = rejected_quotes
     obj.setdefault("coverage_type", "one_shot")
     obj["section"] = "story"
     obj["theme_label"] = theme_label
@@ -583,7 +743,50 @@ def stage2_story(theme_label, theme_posts, angle=None, timeline_map_summary=None
     obj["completion_tokens"] = int(usage.get("completion_tokens") or 0)
     obj["cost_usd"] = float(usage.get("cost") or 0.0)
     obj["finish_reason"] = finish_reason
+    obj["_raw_output"] = content
     return obj, usage, model_used, finish_reason
+
+
+def _normalise_quote_text(value):
+    return " ".join(str(value or "").split()).strip(" \t\n\"“”'")
+
+
+def _validate_key_quotes(quotes, theme_posts):
+    """Keep only actual verbatim source quotes; never render model glitches."""
+    sources = {}
+    for post in theme_posts:
+        if post.get("id"):
+            sources[str(post["id"])] = post.get("text") or ""
+    for context in _gather_context_for(theme_posts):
+        if context.get("id"):
+            sources[str(context["id"])] = context.get("text") or ""
+
+    valid, rejected = [], []
+    for quote in quotes if isinstance(quotes, list) else []:
+        if not isinstance(quote, dict):
+            continue
+        post_id = str(quote.get("post_id") or "")
+        candidate = _normalise_quote_text(quote.get("quote"))
+        source = _normalise_quote_text(sources.get(post_id))
+        if len(candidate) >= 8 and candidate in source:
+            valid.append(quote)
+        else:
+            rejected.append({"post_id": post_id, "quote": str(quote.get("quote") or "")[:180]})
+    return valid, rejected
+
+
+_CITATION_RE = re.compile(r"\[post:([^\]]+)\]")
+
+
+def _validate_story_citations(story, theme_posts):
+    """Ensure every citation is an exact supplied post/context ID."""
+    allowed = {str(post.get("id")) for post in theme_posts if post.get("id")}
+    allowed.update(str(post.get("id")) for post in _gather_context_for(theme_posts) if post.get("id"))
+    bad = []
+    for raw in _CITATION_RE.findall(story or ""):
+        if not raw.isdigit() or raw not in allowed:
+            bad.append(raw[:120])
+    return not bad, bad
 
 # ---------- shared helpers ----------
 

@@ -2,8 +2,8 @@
 """test_parser_v2.py — End-to-end smoke test for parser v2 (context expansion).
 
 What we test:
-  1. herald_context.enrich_batch() with a mocked bird subprocess (synthetic
-     thread JSON returned via ./test_mock_bird).
+  1. herald_context.enrich_batch() with synthetic posts and a mocked bird
+     subprocess (thread JSON returned via ./test_mock_bird).
   2. herald_db.get_posts_in_window() round-trips the new fields
      (conversation.id, quoted_tweet.id) correctly.
   3. herald_context.attach_context_to_candidates() attaches _thread_context
@@ -36,6 +36,8 @@ import sys
 import time as _t
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent
+
 # Test artifacts under /tmp so we don't touch live paths.
 TEST_DIR = Path("/tmp/herald-test")
 TEST_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,7 +58,7 @@ if not MOCK_BIRD.exists():
 os.chmod(MOCK_BIRD, 0o755)
 os.environ["HERALD_BIRD_BIN"] = str(MOCK_BIRD)
 
-sys.path.insert(0, "/home/jbruc/optiplex/home/james/srv/herald")
+sys.path.insert(0, str(ROOT))
 
 import herald_db
 import herald_context
@@ -69,34 +71,48 @@ def banner(msg):
 
 
 def load_test_tweets():
-    """test_tweets.json contains TWO concatenated JSON arrays (a hand-edit
-    artefact). Load both; return a flat list of parsed tweets."""
-    with open("/home/jbruc/optiplex/home/james/srv/herald/test_tweets.json") as f:
-        raw = f.read()
-    # Strip the trailing comma in the first array's close.
-    cleaned = re.sub(r',\s*\](\s*)\[', r']\1[', raw.rstrip())
-    # Drop any other trailing-comma-before-] artefacts.
-    cleaned = re.sub(r',\s*\](\s*)$', r']\1', cleaned)
-    chunks = []
-    depth = 0
-    start = None
-    for i, ch in enumerate(cleaned):
-        if ch == '[':
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == ']':
-            depth -= 1
-            if depth == 0 and start is not None:
-                chunks.append(cleaned[start:i + 1])
-                start = None
-    if not chunks:
-        # Fallback: try single parse.
-        return [json.loads(cleaned)]
-    out = []
-    for c in chunks:
-        out.extend(json.loads(c))
-    return out
+    """Return the smallest fixture covering original, reply and quote cards."""
+    common = {
+        "createdAt": "Thu Jul 02 23:15:00 +0000 2026",
+        "replyCount": 1,
+        "retweetCount": 2,
+        "likeCount": 3,
+    }
+    return [
+        {
+            **common,
+            "id": "9000000000000001",
+            "text": "A standalone timeline post.",
+            "conversationId": "9000000000000001",
+            "author": {"username": "original", "name": "Original"},
+            "authorId": "901",
+        },
+        {
+            **common,
+            "id": "9000000000000002",
+            "text": "A reply that needs its parent thread.",
+            "conversationId": "9000000000000001",
+            "inReplyToStatusId": "9000000000000001",
+            "author": {"username": "replier", "name": "Replier"},
+            "authorId": "902",
+        },
+        {
+            **common,
+            "id": "9000000000000003",
+            "text": "Commentary on a quoted post.",
+            "conversationId": "9000000000000003",
+            "author": {"username": "quoter", "name": "Quoter"},
+            "authorId": "903",
+            "quotedTweet": {
+                "id": "9100000000000001",
+                "text": "A self-contained quoted proposition.",
+                "createdAt": "Thu Jul 02 23:10:00 +0000 2026",
+                "conversationId": "9100000000000001",
+                "author": {"username": "quoted_author", "name": "Quoted Author"},
+                "authorId": "904",
+            },
+        },
+    ]
 
 
 # --- Reset test DB ---
@@ -148,7 +164,7 @@ print(f"  quote_context rows after enrich: {len(qrows)}")
 for r in qrows:
     print(f"    quote {r['quoted_tweet_id']} status={r['fetch_status']} "
           f"err={r['fetch_error']}")
-# Inline quotes from test_tweets.json should be present (no fetch_error).
+# The inline synthetic quote should be present (no fetch error).
 assert any(r["fetch_status"] == "success" for r in qrows), \
     "expected at least one successful quote_context row"
 

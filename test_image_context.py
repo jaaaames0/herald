@@ -20,11 +20,12 @@ import sys
 import time
 import json
 import importlib
+from pathlib import Path
 
 # Force-disable live OpenRouter calls; tests monkeypatch the vision fn.
 os.environ.setdefault("HERALD_OPENROUTER_DISABLED", "1")
 
-sys.path.insert(0, "/home/james/srv/herald")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Use a unique test DB per run to avoid touching the live herald.db.
 TEST_DIR = "/tmp/herald-test-image"

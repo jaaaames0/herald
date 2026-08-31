@@ -132,6 +132,186 @@ CREATE INDEX IF NOT EXISTS idx_stories_topic        ON stories(topic);
 CREATE INDEX IF NOT EXISTS idx_digests_period       ON digests(period_start, period_end);
 CREATE INDEX IF NOT EXISTS idx_story_posts_post     ON story_posts(post_id);
 
+-- Timeline-first edition storage. Captures preserve what X actually showed,
+-- including order, independently of any later editorial selection.
+CREATE TABLE IF NOT EXISTS timeline_captures (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  captured_at INTEGER NOT NULL,
+  post_count INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS capture_posts (
+  capture_id INTEGER NOT NULL,
+  post_id INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (capture_id, post_id)
+);
+CREATE INDEX IF NOT EXISTS idx_capture_posts_capture ON capture_posts(capture_id, position);
+
+-- Metric observations preserve the state of a card when it was actually seen.
+-- `posts.metrics` remains the latest value for quick rendering; this table is
+-- what lets the story desk distinguish an old, slow post from a new one that
+-- is gathering momentum.
+CREATE TABLE IF NOT EXISTS post_observations (
+  capture_id INTEGER NOT NULL,
+  post_id INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  metrics TEXT,
+  PRIMARY KEY (capture_id, post_id)
+);
+CREATE INDEX IF NOT EXISTS idx_post_observations_post_time ON post_observations(post_id, observed_at);
+
+-- The story desk is deliberately separate from published `stories`. A desk
+-- candidate can accumulate sources for days before it is fit to publish.
+CREATE TABLE IF NOT EXISTS story_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  anchor_key TEXT NOT NULL UNIQUE,
+  anchor TEXT NOT NULL,
+  story_type TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'watching',
+  rationale TEXT,
+  readiness REAL NOT NULL DEFAULT 0,
+  urgency TEXT NOT NULL DEFAULT 'normal',
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  published_digest_id INTEGER,
+  -- If a later development belongs to an already-published story, keep the
+  -- new candidate distinct while preserving the editorial lineage.
+  continuity_parent_id INTEGER,
+  continuity_note TEXT,
+  planner_model TEXT,
+  planner_raw TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_story_candidates_state_seen ON story_candidates(state, last_seen DESC);
+
+ALTER TABLE story_candidates ADD COLUMN continuity_parent_id INTEGER;
+ALTER TABLE story_candidates ADD COLUMN continuity_note TEXT;
+CREATE INDEX IF NOT EXISTS idx_story_candidates_continuity ON story_candidates(continuity_parent_id);
+
+CREATE TABLE IF NOT EXISTS story_candidate_posts (
+  candidate_id INTEGER NOT NULL,
+  post_id INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT 'source',
+  relevance REAL NOT NULL DEFAULT 1.0,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (candidate_id, post_id)
+);
+CREATE INDEX IF NOT EXISTS idx_story_candidate_posts_post ON story_candidate_posts(post_id);
+
+CREATE TABLE IF NOT EXISTS story_candidate_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_id INTEGER NOT NULL,
+  evidence_kind TEXT NOT NULL,
+  reference_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  data TEXT,
+  observed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_story_candidate_evidence_candidate ON story_candidate_evidence(candidate_id, observed_at);
+
+-- Drafts are deliberately separate from public digests/stories. A desk
+-- writer experiment must never publish merely because it produced prose.
+CREATE TABLE IF NOT EXISTS story_candidate_drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_id INTEGER NOT NULL,
+  headline TEXT,
+  story TEXT,
+  data TEXT NOT NULL,
+  raw_output TEXT,
+  model TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  cost_usd REAL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_story_candidate_drafts_candidate ON story_candidate_drafts(candidate_id, created_at DESC);
+
+-- A private, on-demand edition is an explicit editorial selection of existing
+-- candidate drafts. It is not a public digest and creation never publishes.
+CREATE TABLE IF NOT EXISTS story_issues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT,
+  state TEXT NOT NULL DEFAULT 'draft',
+  note TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  published_at INTEGER
+);
+ALTER TABLE story_issues ADD COLUMN published_at INTEGER;
+CREATE INDEX IF NOT EXISTS idx_story_issues_public ON story_issues(state, published_at DESC);
+CREATE TABLE IF NOT EXISTS story_issue_items (
+  issue_id INTEGER NOT NULL,
+  candidate_id INTEGER NOT NULL,
+  draft_id INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (issue_id, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_story_issue_items_issue ON story_issue_items(issue_id, position);
+
+CREATE TABLE IF NOT EXISTS story_desk_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  period_start INTEGER NOT NULL,
+  period_end INTEGER NOT NULL,
+  input_post_ids TEXT NOT NULL,
+  raw_output TEXT,
+  model TEXT,
+  status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS edition_clusters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  digest_id INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  post_ids TEXT NOT NULL,
+  note TEXT
+);
+CREATE TABLE IF NOT EXISTS edition_cards (
+  digest_id INTEGER NOT NULL,
+  post_id INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  section TEXT NOT NULL,
+  label TEXT,
+  context_post_ids TEXT,
+  context_posts TEXT,
+  PRIMARY KEY (digest_id, post_id)
+);
+ALTER TABLE edition_cards ADD COLUMN context_posts TEXT;
+CREATE INDEX IF NOT EXISTS idx_edition_cards_digest ON edition_cards(digest_id, position);
+
+CREATE TABLE IF NOT EXISTS research_briefs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  digest_id INTEGER NOT NULL UNIQUE,
+  lead_label TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  brief_id INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  title TEXT,
+  excerpt TEXT,
+  retrieved_at INTEGER NOT NULL
+);
+
+-- Private, operator-facing audit trail for the restored editorial pipeline.
+-- It records what the model was shown and what bounded evidence work was
+-- performed, without adding debugging material to the public digest UI.
+CREATE TABLE IF NOT EXISTS digest_dossiers (
+  digest_id INTEGER PRIMARY KEY,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+ALTER TABLE digests ADD COLUMN edition_meta TEXT;
+ALTER TABLE digests ADD COLUMN pipeline_run_id INTEGER;
+ALTER TABLE posts ADD COLUMN amplified_by TEXT;
+
 -- Idempotent column additions for token/cost tracking (added 2026-06-28)
 -- and conversation context (added 2026-07-03).
 -- SQLite ALTER TABLE ADD COLUMN has no IF NOT EXISTS; herald_db.init_schema

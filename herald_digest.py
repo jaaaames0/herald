@@ -23,17 +23,26 @@ import sys
 import time
 from pathlib import Path
 
+from herald_env import load_herald_env
+
+# Load operator configuration before importing modules whose tunables are
+# evaluated at import time. This makes manual CLI runs match systemd runs.
+load_herald_env()
+
 import herald_db
 import herald_embed
 import herald_env
 import herald_synthesise
-from herald_env import load_herald_env
+import herald_edition
+import herald_narrative
+import herald_evidence
+import herald_desk
 
 
 HERE = Path(__file__).parent
 
-# Default synthesis model; overridable via HERALD_MODEL in ~/.config/herald/.env
-# (which is loaded by load_herald_env() at startup). For the cheap-but-not-free
+# Default synthesis model; overridable via HERALD_MODEL in the parent
+# environment or the explicitly selected HERALD_ENV_PATH. For the cheap-but-not-free
 # baseline we use openai/gpt-oss-120b: ~$0.03/M input, ~$0.15/M output. Reasoning
 # model — budget more max_tokens than a non-reasoning model needs.
 DEFAULT_MODEL = os.environ.get("HERALD_MODEL", "openai/gpt-oss-120b")
@@ -41,7 +50,7 @@ DEFAULT_MODEL = os.environ.get("HERALD_MODEL", "openai/gpt-oss-120b")
 # Pre-filter caps. The pre-filter picks ~max_candidates posts out of the
 # window's full set to send to stage 1 (timeline map). Default 40 is plenty
 # for a 12h window of X; tweak via CLI flags or env.
-DEFAULT_MAX_CANDIDATES = int(os.environ.get("HERALD_MAX_CANDIDATES", "40"))
+DEFAULT_MAX_CANDIDATES = int(os.environ.get("HERALD_MAX_CANDIDATES", "60"))
 
 # Phase 3.8: cap on items (single-post picks from stage 1). Items ride in
 # addition to stories, capped independently. The editor already chose the
@@ -54,20 +63,15 @@ MAX_ITEMS_PER_DIGEST = int(os.environ.get("HERALD_MAX_ITEMS_PER_DIGEST", "10"))
 def cmd_collect(args):
     """Chain: bird home → collect.py → parser.py → herald_ingest.py
 
-    Pipeline order (added 2026-07-03 for parser v2):
+    Pipeline order:
       1. bird home (raw feed)
-      2. collect.py — RT resolution + age gate
+      2. collect.py — preserve observed cards + age gate
       3. parser.py — normalised JSONL
-      4. herald_context.enrich_batch — eager fetch thread/quote context for
-         the just-parsed posts, write to conversation_context / quote_context
-         so the digest path has warm context. Best-effort; failures don't
-         block ingest.
-      5. herald_ingest.py — write posts to DB
+      4. herald_ingest.py — write posts to DB
+      5. record ordered snapshot membership.
 
-    Eager (not on-demand) was the design choice for v1: digest time is
-    time-sensitive (06:00/14:00 AEST). Collect runs every 30min peak / 2h
-    off-peak with headroom for bird calls. Failures are recorded so we
-    don't repeatedly retry the same fetch.
+    Collection makes exactly one X request (``bird home``). Context, media,
+    article and retweet-resolution reads are intentionally forbidden here.
     """
     feed_n = args.n
 
@@ -113,58 +117,9 @@ def cmd_collect(args):
         return 1
     parsed_jsonl = parser.stdout
 
-    # 4. enrich: eager fetch context (best-effort, doesn't block ingest)
-    try:
-        import herald_context
-        parsed_posts = []
-        for line in parsed_jsonl.split("\n"):
-            line = line.strip()
-            if line:
-                try:
-                    parsed_posts.append(json.loads(line))
-                except json.JSONDecodeError as e:
-                    print(f"[collect] WARN: malformed JSONL line skipped: {e}", file=sys.stderr)
-        if parsed_posts:
-            attempted, succeeded, failed, skipped = herald_context.enrich_batch(parsed_posts)
-            print(
-                f"[collect] context: in={len(parsed_posts)} attempted={attempted} "
-                f"ok={succeeded} failed={failed} skipped={skipped}",
-                file=sys.stderr,
-            )
-            # Phase 3.6.1: eager fetch of image descriptions for any photo
-            # media in this batch. Mirrors the collect-time context pattern;
-            # best-effort — failures don't block ingest.
-            try:
-                import herald_media
-                img_attempted, img_ok, img_fail, img_skip = herald_media.enrich_media_batch(parsed_posts)
-                if img_attempted or img_fail or img_skip:
-                    print(
-                        f"[collect] media: attempted={img_attempted} "
-                        f"ok={img_ok} failed={img_fail} skipped={img_skip}",
-                        file=sys.stderr,
-                    )
-            except Exception as e:
-                print(f"[collect] WARN: herald_media.enrich_media_batch failed: {e}", file=sys.stderr)
+    parsed_posts = [json.loads(line) for line in parsed_jsonl.splitlines() if line.strip()]
 
-            # Phase 3.6.2: eager fetch of article bodies for outbound links.
-            # Same pattern as media: best-effort, never blocks ingest.
-            try:
-                import herald_links
-                lnk_attempted, lnk_ok, lnk_fail, lnk_skip = herald_links.enrich_link_batch(parsed_posts)
-                if lnk_attempted or lnk_fail or lnk_skip:
-                    print(
-                        f"[collect] links: attempted={lnk_attempted} "
-                        f"ok={lnk_ok} failed={lnk_fail} skipped={lnk_skip}",
-                        file=sys.stderr,
-                    )
-            except Exception as e:
-                print(f"[collect] WARN: herald_links.enrich_link_batch failed: {e}", file=sys.stderr)
-        else:
-            print("[collect] context: 0 parsed posts; nothing to enrich", file=sys.stderr)
-    except Exception as e:
-        print(f"[collect] WARN: herald_context.enrich_batch failed: {e}", file=sys.stderr)
-
-    # 5. ingest (writes to /var/lib/herald/herald.db)
+    # 4. ingest (writes to /var/lib/herald/herald.db)
     ingest = subprocess.run(
         ["python3", str(HERE / "herald_ingest.py")],
         input=parsed_jsonl,
@@ -175,6 +130,16 @@ def cmd_collect(args):
     if ingest.returncode != 0:
         print(f"ERROR: herald_ingest.py failed", file=sys.stderr)
         return 1
+
+    # 5. Persist the order X showed us. This is a DB-only operation.
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        capture_id = herald_db.record_timeline_capture(conn, [p["id"] for p in parsed_posts])
+        conn.commit()
+        print(f"[collect] snapshot={capture_id} posts={len(parsed_posts)}", file=sys.stderr)
+    finally:
+        conn.close()
 
     return 0
 
@@ -194,9 +159,160 @@ def parse_window(s):
     return until_ts - seconds, until_ts
 
 
+def cmd_desk(args):
+    """Review accumulated timeline material into persistent, unpublished stories."""
+    since_ts, until_ts = parse_window(args.since)
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        if args.replay is not None:
+            candidates, usage, model, finish = herald_desk.replay_review(conn, args.replay)
+        else:
+            candidates, usage, model, finish = herald_desk.review(
+                conn, since_ts, until_ts, dry_run=args.dry_run,
+            )
+        print(
+            f"[desk] candidates={len(candidates)} model={model} finish={finish} "
+            f"cost=${float(usage.get('cost') or 0):.6f}", file=sys.stderr,
+        )
+        if args.show:
+            print(json.dumps({"candidates": candidates, "usage": usage,
+                              "model": model, "finish": finish}, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_desk_evidence(args):
+    """Gather bounded source context for ready (or explicitly chosen) desk stories."""
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        results = herald_desk.gather_evidence(
+            conn, state=args.state, candidate_ids=args.candidate, dry_run=args.dry_run,
+        )
+        print(f"[desk-evidence] candidates={len(results)}", file=sys.stderr)
+        if args.show:
+            print(json.dumps({"candidates": results}, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_desk_status(args):
+    """List the accumulated story desk without invoking models or fetchers."""
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        candidates = herald_db.list_story_candidates(conn, state=args.state, limit=args.limit)
+        if args.show:
+            print(json.dumps({"candidates": candidates}, ensure_ascii=False, indent=2))
+        else:
+            for candidate in candidates:
+                print(
+                    f"{candidate['id']:>3}  {candidate['state']:<8} "
+                    f"{candidate['readiness']:.2f}  {candidate['source_count']} sources  {candidate['anchor']}"
+                )
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_desk_packet(args):
+    """Print an inspectable, cache-only evidence packet for one desk candidate."""
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        data = herald_desk.packet(conn, args.candidate)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print(herald_desk.render_packet_markdown(data), end="")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_desk_write(args):
+    """Write an unpublished draft from one desk candidate's cached packet."""
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        if args.replay is not None:
+            draft_id = args.replay
+            draft = herald_desk.replay_draft(conn, draft_id)
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
+            model, finish = draft.get("model_version"), "replay"
+        else:
+            if args.candidate is None:
+                raise ValueError("desk-write requires a candidate unless --replay is used")
+            draft_id, draft, usage, model, finish = herald_desk.write_draft(
+                conn, args.candidate, dry_run=args.dry_run,
+            )
+        print(
+            f"[desk-write] draft_id={draft_id} model={model} finish={finish} "
+            f"cost=${float(usage.get('cost') or 0):.6f}", file=sys.stderr,
+        )
+        if args.show:
+            print(json.dumps(draft, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_desk_issue(args):
+    """Create a private, on-demand issue from existing candidate drafts."""
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        issue = herald_desk.create_issue(
+            conn, candidate_ids=args.candidate, limit=args.limit, title=args.title,
+        )
+        print(
+            f"[desk-issue] issue_id={issue['id']} items={len(issue['items'])} state=draft cost=$0.000000",
+            file=sys.stderr,
+        )
+        if args.show:
+            print(json.dumps(issue, ensure_ascii=False, indent=2))
+        else:
+            print(herald_desk.render_issue_markdown(issue), end="")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_desk_publish(args):
+    """Explicitly publish one private issue; no model or collection work occurs."""
+    conn = herald_db.get_connection()
+    try:
+        herald_db.init_schema(conn)
+        issue = herald_desk.publish_issue(conn, args.issue)
+        print(
+            f"[desk-publish] issue_id={issue['id']} items={len(issue['items'])} state={issue['state']} cost=$0.000000",
+            file=sys.stderr,
+        )
+        if args.show:
+            print(json.dumps(issue, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+    return 0
+
+
 def _posts_index_by_id(posts):
     """Index posts by their canonical id (X tweet id) for fast lookup."""
     return {p["id"]: p for p in posts}
+
+
+def _extractive_item(post, kind, why):
+    """Surface a self-contained short post without inventing a surrounding world."""
+    text = (post.get("text") or "").strip()
+    author = (post.get("author") or {}).get("username", "unknown")
+    return {
+        "headline": f"@{author}: {text.replace(chr(10), ' ')[:88]}",
+        "story": f"{text} [post:{post['id']}]", "topic": kind, "key_quotes": [],
+        "coverage_type": "one_shot", "section": "story", "theme_label": kind, "angle": why,
+        "model_version": "extractive-item", "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0,
+    }
 
 
 def _attach_all_contexts(candidates):
@@ -245,8 +361,106 @@ def _attach_all_contexts(candidates):
     return counts
 
 
+def cmd_edition_digest(args):
+    """Generate the bounded, extractive timeline edition."""
+    try:
+        since_ts, until_ts = parse_window(args.since)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    conn = herald_db.get_connection()
+    herald_db.init_schema(conn)
+    run_id = herald_db.start_pipeline_run(conn, "edition", source="x")
+    try:
+        edition = herald_edition.build_edition(conn, since_ts, until_ts, dry_run=args.dry_run)
+        if not edition:
+            herald_db.finish_pipeline_run(conn, run_id, "skipped", rows_out=0, error="no timeline snapshots in window")
+            conn.commit()
+            print("[edition] no timeline snapshots in window", file=sys.stderr)
+            return 0
+        digest_id = herald_db.upsert_digest_with_stories(
+            conn, period_start=since_ts, period_end=until_ts, stories=[], sources=["x"],
+            model_versions=["edition-editor" if not args.dry_run else "dry-run"],
+            input_post_ids=[str(p["external_id"]) for p in edition["cards"]],
+            window_hours=(until_ts - since_ts) / 3600.0,
+        )
+        conn.execute("UPDATE digests SET pipeline_run_id=? WHERE id=?", (run_id, digest_id))
+        herald_db.save_edition(conn, digest_id, edition["cards"], edition["clusters"],
+                               edition["ledger"], research=edition["research"])
+        usage = edition.get("usage") or {}
+        herald_db.finish_pipeline_run(
+            conn, run_id, "success", rows_out=len(edition["cards"]),
+            prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
+            cost_usd=usage.get("cost"), model=herald_edition.EDITOR_MODEL,
+        )
+        conn.commit()
+        print(f"[edition] digest_id={digest_id} shown={edition['ledger']['shown']} "
+              f"captured={edition['ledger']['captured']} context_reads={edition['ledger']['context_reads']}", file=sys.stderr)
+        if args.show:
+            print(json.dumps(herald_db.get_edition(conn, digest_id), ensure_ascii=False, indent=2, default=str))
+        return 0
+    except Exception as e:
+        conn.rollback()
+        herald_db.finish_pipeline_run(conn, run_id, "failed", error=str(e))
+        conn.commit()
+        raise
+    finally:
+        conn.close()
 
-def cmd_digest(args):
+
+def cmd_narrative_digest(args):
+    """Build the bounded Narrative v2 issue from timeline snapshots."""
+    try:
+        since_ts, until_ts = parse_window(args.since)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    conn = herald_db.get_connection()
+    herald_db.init_schema(conn)
+    run_id = herald_db.start_pipeline_run(conn, "narrative", source="x")
+    # Evidence gathering opens its own cache-writing SQLite connections.
+    # Commit the run record before that work so this connection cannot hold
+    # the writer lock across selected link/article fetches.
+    conn.commit()
+    try:
+        issue = herald_narrative.build_issue(conn, since_ts, until_ts, dry_run=args.dry_run)
+        if not issue:
+            herald_db.finish_pipeline_run(conn, run_id, "skipped", rows_out=0, error="no timeline snapshots in window")
+            conn.commit()
+            return 0
+        for story in issue["stories"]:
+            story["post_count"] = len(story["post_ids"])
+            story["total_score"] = 0.0
+            story["cluster_method"] = "narrative-v2"
+        digest_id = herald_db.upsert_digest_with_stories(
+            conn, period_start=since_ts, period_end=until_ts, stories=issue["stories"], sources=["x"],
+            model_versions=[m for m in issue["models"] if m], zeitgeist=None,
+            timeline_map={"narrative_v2": True, "plan": issue["plan"], "evidence": issue["evidence"], "finish": issue["finish"]},
+            input_post_ids=issue["candidate_ids"],
+            window_hours=(until_ts - since_ts) / 3600.0,
+        )
+        conn.execute("UPDATE digests SET pipeline_run_id=? WHERE id=?", (run_id, digest_id))
+        usage = issue["usage"]
+        herald_db.finish_pipeline_run(conn, run_id, "success", rows_out=len(issue["stories"]),
+                                      prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"],
+                                      cost_usd=usage["cost"], model=issue["models"][-1] if issue["models"] else None)
+        conn.commit()
+        print(f"[narrative] digest_id={digest_id} stories={len(issue['stories'])} candidates={issue['candidate_count']} "
+              f"context_reads={issue['evidence']['context_reads']} finish={issue['finish']}", file=sys.stderr)
+        if args.show:
+            print(json.dumps(herald_db.get_digest_summary(conn, digest_id), ensure_ascii=False, indent=2, default=str))
+        return 0
+    except Exception as e:
+        conn.rollback()
+        herald_db.finish_pipeline_run(conn, run_id, "failed", error=str(e))
+        conn.commit()
+        raise
+    finally:
+        conn.close()
+
+
+
+def cmd_legacy_digest(args):
     """Pull posts in window → pre-filter (embed+cluster) → two-stage LLM digest.
 
     Pipeline:
@@ -276,11 +490,22 @@ def cmd_digest(args):
     run_id = herald_db.start_pipeline_run(
         conn, "digest", source="x", rows_in=max_candidates,
     )
+    # Targeted evidence opens independent cache-writing connections. Commit
+    # this run record before any evidence work so it never holds SQLite's
+    # writer lock across link, image, or direct-parent cache writes.
+    conn.commit()
     started = time.time()
 
     try:
         # 1. Pull posts in window
         posts = herald_db.get_posts_in_window(conn, since_ts, until_ts)
+        # Rows written before collector-side RT unwrapping are incomplete
+        # wrapper cards. Never feed those truncated, misattributed strings to
+        # the editor; a fresh collect writes the original under its own ID.
+        legacy_retweets = sum(1 for post in posts if post.get("post_type") == "retweet")
+        if legacy_retweets:
+            posts = [post for post in posts if post.get("post_type") != "retweet"]
+            print(f"[digest] excluded {legacy_retweets} legacy retweet wrapper(s)", file=sys.stderr)
         print(f"[digest] {len(posts)} posts in window", file=sys.stderr)
         if not posts:
             herald_db.finish_pipeline_run(conn, run_id, "skipped", rows_out=0)
@@ -290,10 +515,18 @@ def cmd_digest(args):
 
         # 2. Pre-filter: embed + cluster + rank + select
         print(f"[digest] pre-filter: embedding + clustering...", file=sys.stderr)
-        candidate_idx, ranked_clusters, embed_usage = herald_embed.select_candidates(
-            posts, vectors=None, max_candidates=max_candidates,
-        )
-        candidates = [posts[i] for i in candidate_idx]
+        if dry_run:
+            # A dry run is an offline structural check.  Do not quietly send
+            # embeddings to OpenRouter just because selection happens before
+            # the editor/writer calls.
+            candidates = posts[:max_candidates]
+            ranked_clusters = []
+            embed_usage = {"prompt_tokens": 0, "cost": 0.0}
+        else:
+            candidate_idx, ranked_clusters, embed_usage = herald_embed.select_candidates(
+                posts, vectors=None, max_candidates=max_candidates,
+            )
+            candidates = [posts[i] for i in candidate_idx]
         embed_cost = float((embed_usage or {}).get("cost") or 0.0)
         embed_in = int((embed_usage or {}).get("prompt_tokens") or 0)
         n_multi = sum(1 for c in ranked_clusters if len(c["post_indices"]) > 1)
@@ -335,6 +568,9 @@ def cmd_digest(args):
         timeline_map, s1_usage, s1_model, s1_finish = herald_synthesise.stage1_timeline_map(
             candidates, window_hours=window_hours, dry_run=dry_run,
         )
+        # Keep the raw response out of the public timeline-map JSON. It is
+        # retained in digest_dossiers for local prompt/quality review.
+        stage1_raw = timeline_map.pop("_raw_output", None) if isinstance(timeline_map, dict) else None
         s1_cost = float(s1_usage.get("cost") or 0.0)
         s1_in = int(s1_usage.get("prompt_tokens") or 0)
         s1_out = int(s1_usage.get("completion_tokens") or 0)
@@ -404,6 +640,8 @@ def cmd_digest(args):
         print(f"[digest] stage 2: writing {min(len(stories_to_write), max_stories)} stories...", file=sys.stderr)
         candidate_ids = {p["id"] for p in candidates}
         pid_to_post = _posts_index_by_id(posts)
+        evidence_budget = herald_evidence.new_budget()
+        dossier_stories = []
         stories = []
         total_s2_cost = 0.0
         total_s2_in = 0
@@ -431,6 +669,7 @@ def cmd_digest(args):
                 skipped += 1
                 continue
             angle_str = angle if isinstance(angle, str) else None
+            evidence = herald_evidence.enrich_story_posts(theme_posts, evidence_budget, dry_run=dry_run)
             story, s2_usage, s2_model, s2_finish = herald_synthesise.stage2_story(
                 label, theme_posts, angle=angle_str, timeline_map_summary=None,
                 editor_notes=(timeline_map or {}).get("editor_notes") or None,
@@ -444,6 +683,15 @@ def cmd_digest(args):
                 m = p.get("metrics") or {}
                 eng += (m.get("likes") or 0) + 2 * (m.get("retweets") or 0) + (m.get("replies") or 0)
             story["total_score"] = float(eng)
+            raw_output = story.pop("_raw_output", None)
+            quote_rejections = story.pop("_quote_rejections", [])
+            citation_rejections = story.pop("_citation_rejections", [])
+            dossier_stories.append({
+                "label": label, "angle": angle_str, "post_ids": story["post_ids"],
+                "evidence": evidence, "writer_raw_output": raw_output,
+                "finish_reason": s2_finish, "rejected_key_quotes": quote_rejections,
+                "rejected_citations": citation_rejections,
+            })
             stories.append(story)
             total_s2_cost += float(s2_usage.get("cost") or 0.0)
             total_s2_in += int(s2_usage.get("prompt_tokens") or 0)
@@ -475,15 +723,21 @@ def cmd_digest(args):
                 # rather than fail the digest. Common case: stage 1 referenced
                 # a context post.
                 continue
-            # Stage 2: sliding scale with n_sources=1 → 1-2 sentences or pass-through
-            item_story, i2_usage, i2_model, i2_finish = herald_synthesise.stage2_story(
-                f"[{kind}] {item_post.get('text','')[:80]}",  # theme_label = kind + tweet snippet
-                [item_post],
-                angle=why,                              # the editor's `why` becomes the angle
-                timeline_map_summary=None,
-                editor_notes=(timeline_map or {}).get("editor_notes") or None,
-                dry_run=dry_run,
-            )
+            evidence = herald_evidence.enrich_story_posts([item_post], evidence_budget, dry_run=dry_run)
+            needs_writer = (len((item_post.get("text") or "").strip()) > 280 or
+                            bool(item_post.get("_quote_context") or item_post.get("_thread_context") or
+                                 item_post.get("_link_context") or item_post.get("_image_description")))
+            if needs_writer:
+                item_story, i2_usage, i2_model, i2_finish = herald_synthesise.stage2_story(
+                    f"[{kind}] {item_post.get('text','')[:80]}", [item_post], angle=why,
+                    timeline_map_summary=None, editor_notes=(timeline_map or {}).get("editor_notes") or None,
+                    dry_run=dry_run,
+                )
+            else:
+                item_story = _extractive_item(item_post, kind, why)
+                i2_usage, i2_model, i2_finish = (
+                    {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}, "extractive-item", "stop"
+                )
             item_story["post_ids"] = [item_post["id"]]
             item_story["post_count"] = 1
             m = item_post.get("metrics") or {}
@@ -494,6 +748,16 @@ def cmd_digest(args):
             # but queryable by kind. No separate `coverage_type` enum — items
             # are first-class stories, just shorter.
             item_story["theme_label"] = kind
+            raw_output = item_story.pop("_raw_output", None)
+            quote_rejections = item_story.pop("_quote_rejections", [])
+            citation_rejections = item_story.pop("_citation_rejections", [])
+            dossier_stories.append({
+                "label": f"[{kind}] {item_post.get('text','')[:80]}", "angle": why,
+                "post_ids": item_story["post_ids"], "evidence": evidence,
+                "writer_raw_output": raw_output, "finish_reason": i2_finish,
+                "rejected_key_quotes": quote_rejections,
+                "rejected_citations": citation_rejections,
+            })
             stories.append(item_story)
             total_s2_cost += float(i2_usage.get("cost") or 0.0)
             total_s2_in += int(i2_usage.get("prompt_tokens") or 0)
@@ -525,6 +789,16 @@ def cmd_digest(args):
             input_post_ids=input_post_ids,
             window_hours=window_hours,
         )
+        herald_db.upsert_digest_dossier(conn, digest_id, {
+            "pipeline": "legacy-editor-targeted-evidence-v1",
+            "stage1": {
+                "raw_output": stage1_raw, "finish_reason": s1_finish,
+                "usage": s1_usage, "timeline_map": timeline_map,
+            },
+            "candidate_ids": sorted(candidate_ids),
+            "evidence_budget_remaining": evidence_budget,
+            "stories": dossier_stories,
+        })
 
         # Aggregate token/cost for the pipeline run (stage1 + stage2 + embed)
         total_in = s1_in + total_s2_in + embed_in
@@ -596,6 +870,10 @@ def cmd_digest(args):
     return 0
 
 
+def cmd_digest(args):
+    """Build the restored two-stage editorial digest."""
+    return cmd_legacy_digest(args)
+
 
 def main():
     # Load Herald .env first so OPENROUTER_API_KEY / HERALD_MODEL are populated
@@ -608,14 +886,60 @@ def main():
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     p_collect = subparsers.add_parser("collect", help="Pull + parse + ingest")
-    p_collect.add_argument("-n", type=int, default=75, help="Number of tweets to pull (default: 75)")
+    p_collect.add_argument("-n", type=int, default=100, help="Number of tweets to pull (default: 100)")
     p_collect.set_defaults(func=cmd_collect)
 
-    p_digest = subparsers.add_parser("digest", help="Synthesise a digest from DB posts")
-    p_digest.add_argument("--since", default="12h ago", help="Time window, e.g. '12h ago' / '30m ago' / '1d ago' (default: 12h ago)")
-    p_digest.add_argument("--top", type=int, default=7, help="Max stories to write in stage 2 (default: 7, raised from 5 in Phase 3.7.1)")
-    p_digest.add_argument("--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES, help="Max posts to pre-filter and send to stage 1 LLM (default: 40)")
-    p_digest.add_argument("--dry-run", action="store_true", help="Skip LLM calls; use placeholder synthesis (no cost)")
+    p_desk = subparsers.add_parser("desk", help="Review accumulated posts into unpublished story candidates")
+    p_desk.add_argument("--since", default="72h ago", help="Material to review (default: 72h ago)")
+    p_desk.add_argument("--dry-run", action="store_true", help="Persist a deterministic test candidate without calling the editor")
+    p_desk.add_argument("--replay", type=int, help="Parse a saved desk review without another model call")
+    p_desk.add_argument("--show", action="store_true", help="Print candidate JSON to stdout")
+    p_desk.set_defaults(func=cmd_desk)
+
+    p_desk_evidence = subparsers.add_parser("desk-evidence", help="Gather targeted evidence for desk candidates")
+    p_desk_evidence.add_argument("--state", default="ready", choices=("watching", "ready"),
+                                 help="Candidate state to enrich (default: ready)")
+    p_desk_evidence.add_argument("--candidate", type=int, action="append",
+                                 help="Specific candidate ID (repeatable; overrides --state)")
+    p_desk_evidence.add_argument("--dry-run", action="store_true", help="Report shape without X/article reads")
+    p_desk_evidence.add_argument("--show", action="store_true", help="Print evidence audit JSON to stdout")
+    p_desk_evidence.set_defaults(func=cmd_desk_evidence)
+
+    p_desk_status = subparsers.add_parser("desk-status", help="List persistent story candidates")
+    p_desk_status.add_argument("--state", choices=("watching", "ready", "published"))
+    p_desk_status.add_argument("--limit", type=int, default=30)
+    p_desk_status.add_argument("--show", action="store_true", help="Print full candidate JSON")
+    p_desk_status.set_defaults(func=cmd_desk_status)
+
+    p_desk_packet = subparsers.add_parser("desk-packet", help="Inspect one candidate's cached evidence packet")
+    p_desk_packet.add_argument("candidate", type=int)
+    p_desk_packet.add_argument("--json", action="store_true", help="Emit structured JSON instead of readable Markdown")
+    p_desk_packet.set_defaults(func=cmd_desk_packet)
+
+    p_desk_write = subparsers.add_parser("desk-write", help="Write an unpublished draft from a desk packet")
+    p_desk_write.add_argument("candidate", type=int, nargs="?")
+    p_desk_write.add_argument("--replay", type=int, help="Reparse a saved draft without another model call")
+    p_desk_write.add_argument("--dry-run", action="store_true", help="Create a no-model draft record")
+    p_desk_write.add_argument("--show", action="store_true", help="Print draft JSON")
+    p_desk_write.set_defaults(func=cmd_desk_write)
+
+    p_desk_issue = subparsers.add_parser("desk-issue", help="Assemble private candidate drafts into an on-demand issue")
+    p_desk_issue.add_argument("--candidate", type=int, action="append", help="Candidate ID to include (repeatable)")
+    p_desk_issue.add_argument("--limit", type=int, default=6, help="Maximum ready drafts when no candidates are specified")
+    p_desk_issue.add_argument("--title", help="Optional private issue title")
+    p_desk_issue.add_argument("--show", action="store_true", help="Emit structured private issue JSON")
+    p_desk_issue.set_defaults(func=cmd_desk_issue)
+
+    p_desk_publish = subparsers.add_parser("desk-publish", help="Explicitly publish one reviewed issue")
+    p_desk_publish.add_argument("issue", type=int)
+    p_desk_publish.add_argument("--show", action="store_true", help="Emit published issue JSON")
+    p_desk_publish.set_defaults(func=cmd_desk_publish)
+
+    p_digest = subparsers.add_parser("digest", help="Build the two-stage editorial digest")
+    p_digest.add_argument("--since", default="12h ago", help="Capture window, e.g. '12h ago' / '30m ago' / '1d ago' (default: 12h ago)")
+    p_digest.add_argument("--top", type=int, default=7, help=argparse.SUPPRESS)  # legacy compatibility
+    p_digest.add_argument("--max-candidates", type=int, default=DEFAULT_MAX_CANDIDATES, help=argparse.SUPPRESS)
+    p_digest.add_argument("--dry-run", action="store_true", help="Do not call the editor, X context, or web research")
     p_digest.add_argument("--show", action="store_true", help="Print full digest JSON to stdout")
     p_digest.set_defaults(func=cmd_digest)
 

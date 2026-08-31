@@ -39,7 +39,7 @@ def embed_texts(texts, model=None, timeout=120):
     model = model or DEFAULT_EMBEDDING_MODEL
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY not set. Load ~/.config/herald/.env first.")
+        raise RuntimeError("OPENROUTER_API_KEY not set. Load the protected Herald environment first.")
 
     # Keep only non-empty texts; remember their original indices.
     pairs = [(i, t) for i, t in enumerate(texts) if t and t.strip()]

@@ -1,4 +1,4 @@
-"""Herald env loader. Sources ~/.config/herald/.env into the current process.
+"""Herald env loader for an explicitly selected private environment file.
 
 Used by collect.py (Twitter auth) and herald_digest.py (OpenRouter key + model
 choices). Whitelist-based so we never accidentally pull in unrelated env vars
@@ -11,7 +11,7 @@ caller that loaded it itself), we leave it alone.
 import os
 from pathlib import Path
 
-HERALD_ENV_PATH = Path(os.environ.get("HERALD_ENV_PATH", "~/.config/herald/.env")).expanduser()
+HERALD_ENV_PATH = Path(os.environ.get("HERALD_ENV_PATH", "/etc/herald/worker.env")).expanduser()
 
 # Keys we will load from the .env file. Keep this list narrow.
 LOAD_KEYS = (
@@ -21,6 +21,8 @@ LOAD_KEYS = (
     # OpenRouter (used by herald_digest.py)
     "OPENROUTER_API_KEY",
     "HERALD_MODEL",
+    "HERALD_EDITOR_MODEL",
+    "HERALD_WRITER_MODEL",
     "HERALD_EMBEDDING_MODEL",
     "HERALD_VISION_MODEL",
     # Operational knobs
@@ -29,10 +31,18 @@ LOAD_KEYS = (
     "HERALD_ENV_PATH",
     "HERALD_MAX_CANDIDATES",
     "HERALD_MAX_ITEMS_PER_DIGEST",
+    "HERALD_DESK_MAX_POSTS",
+    "HERALD_DESK_MODEL",
+    "HERALD_DESK_EVIDENCE_CONTEXT_READS",
+    "HERALD_DESK_EVIDENCE_LINK_FETCHES",
+    "HERALD_DESK_EVIDENCE_THREAD_FETCHES",
+    "HERALD_DESK_WRITER_MODEL",
     "HERALD_STAGE1_MAX_TOKENS",
     "HERALD_STAGE2_MAX_TOKENS",
     "HERALD_STAGE1_MAX_REASONING_TOKENS",
     "HERALD_STAGE2_MAX_REASONING_TOKENS",
+    "HERALD_STAGE1_REASONING_EFFORT",
+    "HERALD_STAGE2_REASONING_EFFORT",
     # Phase 3.6 context features
     "HERALD_IMAGES_PER_STORY",
     "HERALD_MAX_MEDIA_FETCHES_PER_CYCLE",

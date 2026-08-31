@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}review desk — herald{% endblock %}
+{% block content %}
+
+<div class="cover">
+  <h1>review desk</h1>
+  <div class="cover-meta"><span>private operator view</span><span>nothing here is published</span></div>
+</div>
+
+<div class="section">
+  <span class="section-label">assembled issues</span>
+  {% if issues %}
+  <div class="digest-list">
+    {% for issue in issues %}
+    <a class="digest-card" href="{{ url_for('desk_issue', issue_id=issue.id) }}">
+      <div class="digest-card-head"><span class="digest-card-title">{{ issue.title or ('issue #' ~ issue.id) }}</span><span class="digest-card-ago">{{ issue.created_ago }}</span></div>
+      <div class="digest-card-meta"><span><strong>{{ issue.item_count }}</strong> draft {{ 'story' if issue.item_count == 1 else 'stories' }}</span><span>state: {{ issue.state }}</span><span>{{ issue.created_str }}</span></div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}<div class="empty"><p>No private issues assembled yet.</p></div>{% endif %}
+</div>
+
+<div class="section">
+  <span class="section-label">candidate queue</span>
+  {% if queue %}
+  <div class="stories">
+  {% for candidate in queue %}
+    <article class="story {% if candidate.state == 'watching' %}story-item{% endif %}">
+      <div class="story-head"><span class="story-headline">{{ candidate.anchor }}</span><span class="story-topic">{{ candidate.state }}</span></div>
+      <div class="story-angle">{{ candidate.story_type }} · readiness {{ '%.2f'|format(candidate.readiness) }} · {{ candidate.source_count }} sources · {{ candidate.urgency }}</div>
+      {% if candidate.continuity_parent_id or candidate.continuity_note %}<div class="story-angle">continuity{% if candidate.continuity_parent_id %} from candidate #{{ candidate.continuity_parent_id }}{% endif %}: {{ candidate.continuity_note or 'linked follow-up' }}</div>{% endif %}
+      {% if candidate.rationale %}<div class="story-body"><p>{{ candidate.rationale }}</p></div>{% endif %}
+      <div class="source-metrics">last seen {{ candidate.last_seen_str }}{% if candidate.draft_id %} · draft #{{ candidate.draft_id }}{% if candidate.draft_ago %} · {{ candidate.draft_ago }}{% endif %}: {{ candidate.draft_headline }}{% else %} · no draft yet{% endif %}</div>
+    </article>
+  {% endfor %}
+  </div>
+  {% else %}<div class="empty"><p>No desk candidates yet.</p></div>{% endif %}
+</div>
+{% endblock %}

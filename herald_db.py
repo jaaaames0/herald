@@ -100,6 +100,7 @@ def upsert_post(conn, post):
     media  = json.dumps(post["media"])  if post.get("media")  is not None else None
     links  = json.dumps(post["links"])  if post.get("links")  is not None else None
     metrics = json.dumps(post["metrics"]) if post.get("metrics") is not None else None
+    amplified_by = json.dumps(post["amplified_by"]) if post.get("amplified_by") else None
 
     # Extract conversation/quote fields from the parser's nested block. The
     # parser emits `conversation = {id, is_reply, parent_id, parent_tweet}`
@@ -115,9 +116,9 @@ def upsert_post(conn, post):
         INSERT INTO posts (
           external_id, source, author_id, author_handle,
           created_at, ingested_at, text, media_urls, link_urls,
-          metrics, post_type,
+          metrics, post_type, amplified_by,
           conversation_id, quoted_tweet_id, in_reply_to_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (source, external_id) DO UPDATE SET
           author_id       = excluded.author_id,
           author_handle   = excluded.author_handle,
@@ -126,6 +127,7 @@ def upsert_post(conn, post):
           link_urls       = excluded.link_urls,
           metrics         = excluded.metrics,
           post_type       = excluded.post_type,
+          amplified_by    = excluded.amplified_by,
           conversation_id = excluded.conversation_id,
           quoted_tweet_id = excluded.quoted_tweet_id,
           in_reply_to_id  = excluded.in_reply_to_id,
@@ -142,6 +144,7 @@ def upsert_post(conn, post):
         links,
         metrics,
         post.get("post_type"),
+        amplified_by,
         conversation_id,
         quoted_tweet_id,
         in_reply_to_id,
@@ -241,7 +244,7 @@ def get_posts_in_window(conn, since_ts, until_ts, source="x"):
     cur = conn.execute("""
         SELECT id, external_id, source, author_id, author_handle,
                created_at, ingested_at, text, media_urls, link_urls,
-               metrics, post_type,
+               metrics, post_type, amplified_by,
                conversation_id, quoted_tweet_id, in_reply_to_id
         FROM posts
         WHERE source = ? AND created_at >= ? AND created_at < ?
@@ -265,6 +268,11 @@ def get_posts_in_window(conn, since_ts, until_ts, source="x"):
             "id": d.pop("author_id"),
             "username": d.pop("author_handle"),
         }
+        if d.get("amplified_by"):
+            try:
+                d["amplified_by"] = json.loads(d["amplified_by"])
+            except (json.JSONDecodeError, TypeError):
+                d["amplified_by"] = None
         d["id"] = d.pop("external_id")  # use X tweet ID as the canonical id
         # Pop conversation/quote columns back into the parser's nested shape.
         # herald_context uses these to look up cached threads / quote parents.
@@ -289,6 +297,525 @@ def get_posts_in_window(conn, since_ts, until_ts, source="x"):
             d["quoted_tweet"] = None
         posts.append(d)
     return posts
+
+
+def record_timeline_capture(conn, post_ids, captured_at=None):
+    """Persist one ordered home-timeline snapshot after posts have been ingested."""
+    captured_at = int(captured_at or time.time())
+    cur = conn.execute(
+        "INSERT INTO timeline_captures (captured_at, post_count) VALUES (?, ?)",
+        (captured_at, len(post_ids)),
+    )
+    capture_id = cur.lastrowid
+    for position, external_id in enumerate(post_ids):
+        row = conn.execute(
+            "SELECT id, metrics FROM posts WHERE source='x' AND external_id=?", (str(external_id),)
+        ).fetchone()
+        if row:
+            conn.execute(
+                "INSERT OR IGNORE INTO capture_posts (capture_id, post_id, position) VALUES (?, ?, ?)",
+                (capture_id, row["id"], position),
+            )
+            conn.execute(
+                """INSERT OR REPLACE INTO post_observations
+                   (capture_id, post_id, observed_at, position, metrics)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (capture_id, row["id"], captured_at, position, row["metrics"]),
+            )
+    return capture_id
+
+
+# ---------- Persistent story desk ----------
+
+def save_story_desk_review(conn, period_start, period_end, input_post_ids,
+                           raw_output=None, model=None, status="running"):
+    """Record a review of active timeline material for reproducible tuning."""
+    now = int(time.time())
+    cur = conn.execute(
+        """INSERT INTO story_desk_reviews
+           (started_at, period_start, period_end, input_post_ids, raw_output, model, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (now, int(period_start), int(period_end), json.dumps(input_post_ids), raw_output, model, status),
+    )
+    return cur.lastrowid
+
+
+def finish_story_desk_review(conn, review_id, raw_output, model, status="success"):
+    conn.execute(
+        """UPDATE story_desk_reviews
+           SET finished_at=?, raw_output=?, model=?, status=? WHERE id=?""",
+        (int(time.time()), raw_output, model, status, review_id),
+    )
+
+
+def upsert_story_candidate(conn, candidate, post_roles, model=None, raw_output=None):
+    """Upsert one accumulating desk candidate and its source-role membership.
+
+    ``anchor_key`` is deterministic (currently the lead post ID), so repeated
+    reviews enrich the same developing story instead of creating a new row.
+    Published candidates retain their state until an explicit update workflow
+    is added; a planner cannot silently reopen or overwrite a published item.
+    """
+    now = int(time.time())
+    anchor_key = str(candidate["anchor_key"])
+    state = candidate.get("state") if candidate.get("state") in {"watching", "ready"} else "watching"
+    continuation_id = candidate.get("continuity_candidate_id")
+    continuity_target = None
+    if continuation_id:
+        continuity_target = conn.execute(
+            "SELECT id, state FROM story_candidates WHERE id=?", (int(continuation_id),)
+        ).fetchone()
+    # A stricter replay can identify a better lead for the same editorial
+    # anchor. Re-key that unpublished candidate instead of leaving a stale
+    # duplicate behind just because its first model pass chose a bad lead.
+    existing = conn.execute(
+        """SELECT id, anchor_key FROM story_candidates
+           WHERE anchor=? AND state != 'published' ORDER BY id DESC LIMIT 1""",
+        (candidate["anchor"],),
+    ).fetchone()
+    if existing and not continuity_target and existing["anchor_key"] != anchor_key:
+        conn.execute("UPDATE story_candidates SET anchor_key=? WHERE id=?", (anchor_key, existing["id"]))
+    # An unpublished continuation is one living story: keep its original
+    # identity and accumulate the newly selected sources. A published story is
+    # immutable; its later development becomes a linked, separate candidate.
+    merge_target = continuity_target if continuity_target and continuity_target["state"] != "published" else None
+    if merge_target:
+        candidate_id = merge_target["id"]
+        conn.execute(
+            """UPDATE story_candidates SET anchor=?, story_type=?, state=?, rationale=?,
+               readiness=?, urgency=?, last_seen=?, planner_model=?, planner_raw=?,
+               continuity_note=? WHERE id=?""",
+            (candidate["anchor"], candidate.get("story_type", "timeline_argument"), state,
+             candidate.get("rationale"), float(candidate.get("readiness") or 0),
+             candidate.get("urgency", "normal"), now, model, raw_output,
+             candidate.get("continuity_note") or None, candidate_id),
+        )
+    else:
+        continuity_parent_id = (continuity_target["id"]
+                                if continuity_target and continuity_target["state"] == "published" else None)
+        conn.execute(
+        """INSERT INTO story_candidates
+           (anchor_key, anchor, story_type, state, rationale, readiness, urgency,
+            first_seen, last_seen, continuity_parent_id, continuity_note, planner_model, planner_raw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(anchor_key) DO UPDATE SET
+             anchor=excluded.anchor,
+             story_type=excluded.story_type,
+             state=CASE WHEN story_candidates.state='published' THEN 'published' ELSE excluded.state END,
+             rationale=excluded.rationale,
+             readiness=excluded.readiness,
+             urgency=excluded.urgency,
+             last_seen=excluded.last_seen,
+             continuity_parent_id=COALESCE(story_candidates.continuity_parent_id, excluded.continuity_parent_id),
+             continuity_note=COALESCE(excluded.continuity_note, story_candidates.continuity_note),
+             planner_model=excluded.planner_model,
+             planner_raw=excluded.planner_raw""",
+        (anchor_key, candidate["anchor"], candidate.get("story_type", "timeline_argument"), state,
+         candidate.get("rationale"), float(candidate.get("readiness") or 0),
+         candidate.get("urgency", "normal"), now, now, continuity_parent_id,
+         candidate.get("continuity_note") or None, model, raw_output),
+        )
+        row = conn.execute("SELECT id FROM story_candidates WHERE anchor_key=?", (anchor_key,)).fetchone()
+        candidate_id = row["id"]
+    # Lead roles are foundational claims, not historical colour. If a replay
+    # rejects a former lead, remove it rather than letting it silently remain
+    # in the writer packet. Other roles accumulate across desk reviews.
+    retained_lead_ids = [str(post_id) for post_id, role, _ in post_roles if role == "lead"]
+    if retained_lead_ids and merge_target:
+        # Earlier leads are the historical frame for a continuing story, not
+        # stale contamination. Preserve them explicitly for the writer.
+        placeholders = ",".join("?" for _ in retained_lead_ids)
+        conn.execute(
+            f"""UPDATE story_candidate_posts SET role='background'
+                WHERE candidate_id=? AND role='lead' AND post_id IN (
+                  SELECT id FROM posts WHERE source='x' AND external_id NOT IN ({placeholders})
+                )""",
+            [candidate_id, *retained_lead_ids],
+        )
+    elif retained_lead_ids:
+        placeholders = ",".join("?" for _ in retained_lead_ids)
+        conn.execute(
+            f"""DELETE FROM story_candidate_posts
+                WHERE candidate_id=? AND role='lead' AND post_id IN (
+                  SELECT id FROM posts WHERE source='x' AND external_id NOT IN ({placeholders})
+                )""",
+            [candidate_id, *retained_lead_ids],
+        )
+    for post_id, role, relevance in post_roles:
+        post = conn.execute(
+            "SELECT id FROM posts WHERE source='x' AND external_id=?", (str(post_id),)
+        ).fetchone()
+        if not post:
+            continue
+        conn.execute(
+            """INSERT INTO story_candidate_posts
+               (candidate_id, post_id, role, relevance, first_seen, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(candidate_id, post_id) DO UPDATE SET
+                 role=excluded.role, relevance=excluded.relevance, last_seen=excluded.last_seen""",
+            (candidate_id, post["id"], role, float(relevance), now, now),
+        )
+    readiness = assess_story_candidate(conn, candidate_id)
+    # The planner may nominate a candidate as ready, but it cannot bypass the
+    # minimum evidence shape. A later desk pass can promote it once the missing
+    # source has actually been captured.
+    if state == "ready" and not readiness["ready"]:
+        conn.execute(
+            "UPDATE story_candidates SET state='watching', readiness=MIN(readiness, 0.65) WHERE id=? AND state != 'published'",
+            (candidate_id,),
+        )
+    return candidate_id
+
+
+def assess_story_candidate(conn, candidate_id):
+    """Return the deterministic minimum-evidence verdict for one candidate.
+
+    This is deliberately a floor, not an attempt to score newsworthiness. The
+    desk model still decides what is worth following; the floor merely prevents
+    a single unsupported post from being presented as a reported story.
+    """
+    candidate = conn.execute(
+        "SELECT story_type FROM story_candidates WHERE id=?", (int(candidate_id),)
+    ).fetchone()
+    if not candidate:
+        raise ValueError(f"story candidate {candidate_id} does not exist")
+    rows = conn.execute(
+        "SELECT role FROM story_candidate_posts WHERE candidate_id=?", (int(candidate_id),)
+    ).fetchall()
+    roles = [row["role"] for row in rows]
+    linked = conn.execute(
+        """SELECT count(*) AS n FROM story_candidate_evidence
+           WHERE candidate_id=? AND evidence_kind='linked_article' AND status='success'""",
+        (int(candidate_id),),
+    ).fetchone()["n"]
+    if "lead" not in roles:
+        return {"ready": False, "reason": "needs a current lead post", "source_count": len(roles)}
+    story_type = candidate["story_type"]
+    if story_type == "one_shot":
+        return {"ready": True, "reason": "self-contained one-shot with a lead", "source_count": len(roles)}
+    support = {"reaction", "counterpoint", "colour", "background", "source"}
+    has_support = any(role in support for role in roles)
+    if story_type == "reported_event":
+        if has_support or linked:
+            return {"ready": True, "reason": "lead plus corroboration or linked reporting", "source_count": len(roles)}
+        return {"ready": False, "reason": "reported event needs corroboration or linked reporting", "source_count": len(roles)}
+    if len(roles) >= 2 and has_support:
+        return {"ready": True, "reason": "lead plus a distinct timeline response or background", "source_count": len(roles)}
+    return {"ready": False, "reason": "needs a lead and a distinct response, counterpoint, or background", "source_count": len(roles)}
+
+
+def list_story_candidates(conn, state=None, limit=50):
+    params = []
+    where = ""
+    if state:
+        where = "WHERE sc.state=?"
+        params.append(state)
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""SELECT sc.*, count(scp.post_id) AS source_count
+            FROM story_candidates sc
+            LEFT JOIN story_candidate_posts scp ON scp.candidate_id=sc.id
+            {where}
+            GROUP BY sc.id
+            ORDER BY sc.last_seen DESC LIMIT ?""", params,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_story_candidate_posts(conn, candidate_id):
+    """Return a desk candidate's sources in synthesis-compatible post shape."""
+    rows = conn.execute(
+        """SELECT p.*, scp.role AS desk_role, scp.relevance AS desk_relevance
+            FROM story_candidate_posts scp JOIN posts p ON p.id=scp.post_id
+            WHERE scp.candidate_id=? ORDER BY scp.relevance DESC, scp.first_seen ASC""",
+        (int(candidate_id),),
+    ).fetchall()
+    posts = []
+    for row in rows:
+        d = dict(row)
+        for field in ("media_urls", "link_urls", "metrics"):
+            try:
+                d[field] = json.loads(d[field]) if d.get(field) else []
+            except (TypeError, json.JSONDecodeError):
+                d[field] = []
+        if d.get("amplified_by"):
+            try:
+                d["amplified_by"] = json.loads(d["amplified_by"])
+            except (TypeError, json.JSONDecodeError):
+                d["amplified_by"] = None
+        d["id"] = str(d.pop("external_id"))
+        d["links"] = d["link_urls"]
+        d["media"] = d["media_urls"]
+        d["author"] = {"id": d.pop("author_id"), "username": d.pop("author_handle")}
+        d["conversation"] = {
+            "id": d.get("conversation_id"), "parent_id": d.get("in_reply_to_id"),
+            "is_reply": bool(d.get("in_reply_to_id")), "parent_tweet": None,
+        }
+        d["quoted_tweet"] = ({"id": d["quoted_tweet_id"], "text": None}
+                             if d.get("quoted_tweet_id") else None)
+        posts.append(d)
+    return posts
+
+
+def add_story_candidate_evidence(conn, candidate_id, evidence_kind, reference_id,
+                                 status, data=None):
+    """Append an auditable evidence observation to a persistent desk item."""
+    conn.execute(
+        """INSERT INTO story_candidate_evidence
+           (candidate_id, evidence_kind, reference_id, status, data, observed_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (int(candidate_id), evidence_kind, str(reference_id) if reference_id else None,
+         status, json.dumps(data, ensure_ascii=False) if data is not None else None, int(time.time())),
+    )
+
+
+def save_story_candidate_draft(conn, candidate_id, draft, raw_output=None):
+    """Persist an unpublished writer experiment for later editorial review."""
+    cur = conn.execute(
+        """INSERT INTO story_candidate_drafts
+           (candidate_id, headline, story, data, raw_output, model, prompt_tokens,
+            completion_tokens, cost_usd, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (int(candidate_id), draft.get("headline"), draft.get("story"),
+         json.dumps(draft, ensure_ascii=False), raw_output, draft.get("model_version"),
+         int(draft.get("prompt_tokens") or 0), int(draft.get("completion_tokens") or 0),
+         float(draft.get("cost_usd") or 0), int(time.time())),
+    )
+    return cur.lastrowid
+
+
+def candidate_drafts_for_issue(conn, candidate_ids=None, limit=6):
+    """Return the newest private draft for each evidence-qualified candidate."""
+    params = []
+    where = "WHERE sc.state='ready'"
+    if candidate_ids:
+        placeholders = ",".join("?" for _ in candidate_ids)
+        where += f" AND sc.id IN ({placeholders})"
+        params.extend(int(candidate_id) for candidate_id in candidate_ids)
+    rows = conn.execute(
+        f"""SELECT sc.*, d.id AS draft_id, d.headline, d.story, d.data,
+                   d.model AS draft_model, d.created_at AS draft_created_at,
+                   count(scp.post_id) AS source_count
+            FROM story_candidates sc
+            JOIN story_candidate_drafts d ON d.id=(
+              SELECT d2.id FROM story_candidate_drafts d2
+              WHERE d2.candidate_id=sc.id ORDER BY d2.created_at DESC, d2.id DESC LIMIT 1
+            )
+            LEFT JOIN story_candidate_posts scp ON scp.candidate_id=sc.id
+            {where}
+            GROUP BY sc.id
+            ORDER BY sc.urgency='breaking' DESC, sc.readiness DESC, sc.last_seen DESC
+            LIMIT ?""",
+        [*params, int(limit)],
+    ).fetchall()
+    selected = []
+    for row in rows:
+        item = dict(row)
+        if not assess_story_candidate(conn, item["id"])["ready"]:
+            continue
+        selected.append(item)
+    return selected
+
+
+def create_story_issue(conn, candidate_ids=None, limit=6, title=None):
+    """Create a private issue from the latest drafts; never publish it."""
+    items = candidate_drafts_for_issue(conn, candidate_ids=candidate_ids, limit=limit)
+    if candidate_ids:
+        selected_ids = {item["id"] for item in items}
+        missing = sorted(set(int(candidate_id) for candidate_id in candidate_ids) - selected_ids)
+        if missing:
+            raise ValueError(f"candidate(s) not ready with a draft: {', '.join(map(str, missing))}")
+    now = int(time.time())
+    cur = conn.execute(
+        "INSERT INTO story_issues (title, state, created_at, updated_at) VALUES (?, 'draft', ?, ?)",
+        (title or None, now, now),
+    )
+    issue_id = cur.lastrowid
+    for position, item in enumerate(items, 1):
+        conn.execute(
+            """INSERT INTO story_issue_items (issue_id, candidate_id, draft_id, position)
+               VALUES (?, ?, ?, ?)""",
+            (issue_id, item["id"], item["draft_id"], position),
+        )
+    return issue_id
+
+
+def get_story_issue(conn, issue_id):
+    row = conn.execute("SELECT * FROM story_issues WHERE id=?", (int(issue_id),)).fetchone()
+    if not row:
+        raise ValueError(f"story issue {issue_id} does not exist")
+    issue = dict(row)
+    items = conn.execute(
+        """SELECT sii.position, sc.id AS candidate_id, sc.anchor, sc.story_type, sc.urgency,
+                   sc.continuity_parent_id, sc.continuity_note,
+                   d.id AS draft_id, d.headline, d.story, d.data, d.model
+            FROM story_issue_items sii
+            JOIN story_candidates sc ON sc.id=sii.candidate_id
+            JOIN story_candidate_drafts d ON d.id=sii.draft_id
+            WHERE sii.issue_id=? ORDER BY sii.position""",
+        (int(issue_id),),
+    ).fetchall()
+    issue["items"] = [dict(item) for item in items]
+    return issue
+
+
+def publish_story_issue(conn, issue_id):
+    """Make an explicitly assembled issue public; no prose is regenerated."""
+    issue = get_story_issue(conn, issue_id)
+    if not issue["items"]:
+        raise ValueError(f"story issue {issue_id} has no items")
+    if issue["state"] == "published":
+        return issue
+    if issue["state"] != "draft":
+        raise ValueError(f"story issue {issue_id} is not publishable from state {issue['state']!r}")
+    now = int(time.time())
+    conn.execute(
+        "UPDATE story_issues SET state='published', published_at=?, updated_at=? WHERE id=?",
+        (now, now, int(issue_id)),
+    )
+    return get_story_issue(conn, issue_id)
+
+
+def list_story_issues(conn, limit=20):
+    """List private on-demand issues with their selected-item count."""
+    rows = conn.execute(
+        """SELECT si.*, count(sii.candidate_id) AS item_count
+           FROM story_issues si
+           LEFT JOIN story_issue_items sii ON sii.issue_id=si.id
+           GROUP BY si.id ORDER BY si.updated_at DESC, si.id DESC LIMIT ?""",
+        (int(limit),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_public_story_issues(conn, limit=20):
+    """Public-facing issue index. Legacy digests are intentionally excluded."""
+    rows = conn.execute(
+        """SELECT si.*, count(sii.candidate_id) AS item_count
+           FROM story_issues si
+           LEFT JOIN story_issue_items sii ON sii.issue_id=si.id
+           WHERE si.state='published'
+           GROUP BY si.id ORDER BY si.published_at DESC, si.id DESC LIMIT ?""",
+        (int(limit),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_story_review_queue(conn, limit=30):
+    """Return candidate status plus its newest private draft, for review UI."""
+    rows = conn.execute(
+        """SELECT sc.*, count(scp.post_id) AS source_count,
+                   d.id AS draft_id, d.headline AS draft_headline,
+                   d.created_at AS draft_created_at
+            FROM story_candidates sc
+            LEFT JOIN story_candidate_posts scp ON scp.candidate_id=sc.id
+            LEFT JOIN story_candidate_drafts d ON d.id=(
+              SELECT d2.id FROM story_candidate_drafts d2
+              WHERE d2.candidate_id=sc.id ORDER BY d2.created_at DESC, d2.id DESC LIMIT 1
+            )
+            GROUP BY sc.id
+            ORDER BY CASE sc.state WHEN 'ready' THEN 0 WHEN 'watching' THEN 1 ELSE 2 END,
+                     sc.urgency='breaking' DESC, sc.last_seen DESC LIMIT ?""",
+        (int(limit),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_timeline_window(conn, since_ts, until_ts):
+    """Return unique posts in source-order, plus how often each appeared.
+
+    The newest capture wins for display order. This is intentionally separate
+    from ``get_posts_in_window``: a timeline edition represents what was seen,
+    not merely everything whose source timestamp falls in the interval.
+    """
+    rows = conn.execute(
+        """
+        SELECT p.*, cp.position, tc.captured_at
+        FROM capture_posts cp
+        JOIN timeline_captures tc ON tc.id = cp.capture_id
+        JOIN posts p ON p.id = cp.post_id
+        -- A capture and a manually-triggered edition can share a wall-clock
+        -- second; allow a tiny right-edge tolerance so the just-captured
+        -- timeline is not mysteriously excluded.
+        WHERE tc.captured_at >= ? AND tc.captured_at <= ?
+        ORDER BY tc.captured_at DESC, cp.position ASC
+        """, (since_ts, until_ts + 60)
+    ).fetchall()
+    out, seen = [], set()
+    for row in rows:
+        d = dict(row)
+        if d["id"] in seen:
+            continue
+        seen.add(d["id"])
+        for field in ("media_urls", "link_urls", "metrics"):
+            try:
+                d[field] = json.loads(d[field]) if d.get(field) else []
+            except (TypeError, json.JSONDecodeError):
+                d[field] = []
+        d["links"] = d.pop("link_urls")
+        d["media"] = d.pop("media_urls")
+        d["external_id"] = str(d["external_id"])
+        out.append(d)
+    return out, len(rows)
+
+
+def save_edition(conn, digest_id, cards, clusters, ledger, research=None):
+    """Store edition-specific presentation records alongside the digest."""
+    conn.execute("UPDATE digests SET edition_meta=? WHERE id=?", (json.dumps(ledger), digest_id))
+    for position, cluster in enumerate(clusters):
+        conn.execute(
+            "INSERT INTO edition_clusters (digest_id, position, label, post_ids, note) VALUES (?, ?, ?, ?, ?)",
+            (digest_id, position, cluster["label"], json.dumps(cluster["post_ids"]), cluster.get("note")),
+        )
+    for position, card in enumerate(cards):
+        conn.execute(
+            "INSERT INTO edition_cards (digest_id, post_id, position, section, label, context_post_ids, context_posts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (digest_id, card["id"], position, card.get("section", "timeline"), card.get("label"),
+             json.dumps(card.get("context_post_ids") or []), json.dumps(card.get("_edition_context") or [])),
+        )
+    if research:
+        cur = conn.execute(
+            "INSERT INTO research_briefs (digest_id, lead_label, body, status, created_at) VALUES (?, ?, ?, ?, ?)",
+            (digest_id, research["lead_label"], research["body"], research["status"], int(time.time())),
+        )
+        brief_id = cur.lastrowid
+        for source in research.get("sources", []):
+            conn.execute(
+                "INSERT INTO research_sources (brief_id, url, title, excerpt, retrieved_at) VALUES (?, ?, ?, ?, ?)",
+                (brief_id, source["url"], source.get("title"), source.get("excerpt"), int(time.time())),
+            )
+
+
+def get_edition(conn, digest_id):
+    digest = get_digest_summary(conn, digest_id)
+    if not digest:
+        return None
+    try:
+        digest["edition_meta"] = json.loads(digest.get("edition_meta") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        digest["edition_meta"] = {}
+    cards = conn.execute(
+        """SELECT ec.*, p.* FROM edition_cards ec JOIN posts p ON p.id=ec.post_id
+           WHERE ec.digest_id=? ORDER BY ec.position""", (digest_id,)
+    ).fetchall()
+    digest["edition_cards"] = [dict(r) for r in cards]
+    for card in digest["edition_cards"]:
+        for field in ("metrics", "media_urls", "link_urls", "context_post_ids", "context_posts", "amplified_by"):
+            if isinstance(card.get(field), str):
+                try:
+                    card[field] = json.loads(card[field])
+                except (TypeError, json.JSONDecodeError):
+                    card[field] = [] if field != "amplified_by" else None
+    digest["edition_clusters"] = [dict(r) for r in conn.execute(
+        "SELECT * FROM edition_clusters WHERE digest_id=? ORDER BY position", (digest_id,)
+    ).fetchall()]
+    brief = conn.execute("SELECT * FROM research_briefs WHERE digest_id=?", (digest_id,)).fetchone()
+    if brief:
+        digest["research_brief"] = dict(brief)
+        digest["research_brief"]["sources"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM research_sources WHERE brief_id=? ORDER BY id", (brief["id"],)
+        ).fetchall()]
+    return digest
 
 
 def upsert_digest_with_stories(conn, period_start, period_end, stories,
@@ -387,12 +914,31 @@ def upsert_digest_with_stories(conn, period_start, period_end, stories,
     return digest_id
 
 
+def upsert_digest_dossier(conn, digest_id, data):
+    """Persist local-only pipeline diagnostics for a digest."""
+    conn.execute("""
+        INSERT INTO digest_dossiers (digest_id, data, created_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(digest_id) DO UPDATE SET data=excluded.data, created_at=excluded.created_at
+    """, (digest_id, json.dumps(data, ensure_ascii=False), int(time.time())))
+
+
+def get_digest_dossier(conn, digest_id):
+    row = conn.execute("SELECT data FROM digest_dossiers WHERE digest_id=?", (digest_id,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["data"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
 def list_digests(conn, limit=20, offset=0):
     """Return a list of digests ordered newest first. For the web UI index."""
     rows = conn.execute("""
         SELECT id, period_start, period_end, generated_at,
                duration_estimate_minutes, story_count,
-               topics, sources, model_versions, window_hours
+               topics, sources, model_versions, window_hours, edition_meta, pipeline_run_id
         FROM digests
         ORDER BY id DESC
         LIMIT ? OFFSET ?
@@ -400,7 +946,7 @@ def list_digests(conn, limit=20, offset=0):
     out = []
     for r in rows:
         d = dict(r)
-        for f in ("topics", "sources", "model_versions"):
+        for f in ("topics", "sources", "model_versions", "edition_meta"):
             v = d.get(f)
             if isinstance(v, str) and v:
                 try:
