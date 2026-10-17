@@ -77,7 +77,7 @@ EOF
   grep '^NANOGPT_API_KEY=' "$SRC/.env" | sudo tee -a /etc/herald/worker.env >/dev/null
   sudo systemctl daemon-reload
   sudo systemd-analyze verify $(for u in $UNITS; do echo /etc/systemd/system/$u; done)
-  sudo -u herald-worker env HERALD_DB_PATH=$NEW_DB python3 -c "import sys; sys.path.insert(0, '$LIB/$rel'); import herald_store; herald_store.connect()"
+  sudo -u herald-worker -g herald sh -c "umask 0007; HERALD_DB_PATH=$NEW_DB python3 -c \"import sys; sys.path.insert(0, '$LIB/$rel'); import herald_store; herald_store.connect()\""
   sudo systemctl restart herald-web.service
   sleep 2
   curl -fsS -o /dev/null -w "web %{http_code}\n" http://127.0.0.1:8060/
