@@ -6,6 +6,8 @@ WPM = 230
 IMAGE_SECONDS = 4
 # Long posts are folded after this many words ("show more"), as X does.
 FOLD_WORDS = 90
+# Self-threads show this many continuations; the rest are folded ("show thread").
+THREAD_SHOWN = 1
 
 
 def clip(text, words=FOLD_WORDS):
@@ -19,8 +21,11 @@ def _post_lines(p, indent=""):
     if par:
         out.append(f"{indent}  ↪ @{par['author']['handle']}: {par['text'][:280]}")
     out.append(f"{indent}@{p['author']['handle']}: {clip(p['text'])}")
-    for t in p.get("thread") or []:
+    thread = p.get("thread") or []
+    for t in thread[:THREAD_SHOWN]:
         out.append(f"{indent}  / {clip(t['text'])}")
+    if len(thread) > THREAD_SHOWN:
+        out.append(f"{indent}  / … {len(thread) - THREAD_SHOWN} more in thread")
     for m in p.get("media") or []:
         r = m.get("reading") or {}
         out.append(f"{indent}  [{m['type']}{' · ' + r['kind'] if r.get('kind') else ''}] "
@@ -60,7 +65,7 @@ def _words(s):
 
 def _post_cost(p):
     words, images = min(_words(p.get("text")), FOLD_WORDS), 0
-    for t in p.get("thread") or []:
+    for t in (p.get("thread") or [])[:THREAD_SHOWN]:
         words += min(_words(t.get("text")), FOLD_WORDS)
     for m in p.get("media") or []:
         images += 1

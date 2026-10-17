@@ -237,7 +237,9 @@ Use only ids that appear in the cards. Return only the JSON."""
 
 CHECK_SYSTEM = """You check an editor's groupings before publication. Each story has a subject sentence naming one specific thing, and a list of posts. For every post give a verdict: does it directly respond to, report, or argue about that specific subject? A post belongs if it is about the subject, even if it adds a joke, a chart or an opinion. A post does NOT belong if it only shares a broad topic, is about a related but different event, or would need "also"/"similarly" to connect it. Be strict about different events; don't remove posts just because they are short or jokey.
 
-Return a JSON object: {"stories": [{"index": 0, "verdicts": [{"id": "p3", "belongs": true}, {"id": "p11", "belongs": false, "reason": "about a different event: ..."}]}]}. Give a reason only when belongs is false. Return only the JSON."""
+You may also get SETUPS: short lines the editor wrote to introduce a post. A setup is supported only if everything it states is shown in that post's card (its text, what it replies to or quotes, image text, link preview). A setup that adds a name, number, event or claim not in the card is unsupported, even if it is true.
+
+Return a JSON object: {"stories": [{"index": 0, "verdicts": [{"id": "p3", "belongs": true}, {"id": "p11", "belongs": false, "reason": "about a different event: ..."}]}], "setups": [{"id": "p14", "supported": true}, {"id": "p20", "supported": false, "reason": "..."}]}. Give a reason only for a false verdict. Return only the JSON."""
 
 WRITE_SYSTEM = READER + """
 
@@ -374,11 +376,11 @@ def attach_readings(conn, post):
 
 # -------------------------------------------------------------------- driver
 
-def _call(model, system, user, max_tokens, log, label, usage, effort=None):
+def _call(model, system, user, max_tokens, log, label, usage, effort=None, temperature=0.5):
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     for attempt in range(2):
         t0 = time.time()
-        content, info = herald_llm.chat(model, messages, max_tokens=max_tokens, temperature=0.5, json_mode=True,
+        content, info = herald_llm.chat(model, messages, max_tokens=max_tokens, temperature=temperature, json_mode=True,
                                         reasoning_effort=effort, timeout=600)
         info["seconds"] = round(time.time() - t0, 1)
         info["step"] = label
@@ -436,7 +438,7 @@ RUN_MAX = 4
 
 def size_for(hours):
     if hours <= 9:
-        return 3, 18
+        return 4, 22
     return 5, 26
 
 
@@ -451,7 +453,7 @@ def build(window, models, log=print, check=True):
     plan = {}
     for attempt in range(2):
         plan = _call(models["plan"], PLAN_SYSTEM.format(stories=stories_n, posts=posts_n), header + cards,
-                     12000, log, "plan", usage, models.get("plan_effort"))
+                     12000, log, "plan", usage, models.get("plan_effort"), temperature=0.2)
         if len(plan.get("entries") or []) >= 5:
             break
         log(f"[plan] only {len(plan.get('entries') or [])} entries; retrying")
@@ -488,12 +490,32 @@ def build(window, models, log=print, check=True):
             if not (t == "post" and e.get("id") in used):
                 issues.append(f"unusable entry dropped: {json.dumps(e)[:120]}")
 
+    # The planner tends to over-select; keep the best within the size asked for,
+    # by priority, without disturbing reading order.
+    singles = [e for e in entries if e["type"] != "story"]
+    if len(singles) > posts_n + 6:
+        ranked = sorted(range(len(singles)), key=lambda i: (singles[i].get("priority", 2), i))
+        keep = {id(singles[i]) for i in ranked[:posts_n + 6]}
+        for e in singles:
+            if id(e) not in keep:
+                issues.append(f"over plan size, dropped: {e.get('ids') or e.get('id')} (priority {e.get('priority')})")
+        entries = [e for e in entries if e["type"] == "story" or id(e) in keep]
     stories = [e for e in entries if e["type"] == "story"]
-    if check and stories:
+    setups = [e for e in entries if e["type"] != "story" and e.get("setup")]
+    if check and (stories or setups):
         text = []
         for i, s in enumerate(stories):
             text.append(f"STORY {i}: {s['subject']}\n" + "\n\n".join(window.card(sid, full=False) for sid in s["posts"]))
-        verdict = _call(models["check"], CHECK_SYSTEM, "\n\n=====\n\n".join(text), 8000, log, "check", usage)
+        if setups:
+            text.append("SETUPS:\n\n" + "\n\n".join(
+                f"SETUP for [{e['id']}]: {e['setup']}\n" + window.card(e["id"], full=False) for e in setups))
+        verdict = _call(models["check"], CHECK_SYSTEM, "\n\n=====\n\n".join(text), 8000, log, "check", usage, temperature=0)
+        bad = {x.get("id"): x.get("reason", "") for x in verdict.get("setups") or []
+               if isinstance(x, dict) and x.get("supported") is False}
+        for e in setups:
+            if e["id"] in bad:
+                issues.append(f"check dropped setup for {e['id']} ({e['setup'][:60]!r}): {bad[e['id']]}")
+                e["setup"] = ""
         for v in verdict.get("stories") or []:
             idx = v.get("index")
             if not isinstance(idx, int) or not 0 <= idx < len(stories):

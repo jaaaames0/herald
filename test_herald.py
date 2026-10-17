@@ -197,7 +197,8 @@ class BuildTest(unittest.TestCase):
             {"type": "post", "priority": 2, "id": "p6", "setup": "context"},
             {"type": "post", "id": "p99"},
         ]}
-        check = {"stories": [{"index": 0, "verdicts": [{"id": "p1", "belongs": True}, {"id": "p9", "belongs": False, "reason": "cats"}]}]}
+        check = {"stories": [{"index": 0, "verdicts": [{"id": "p1", "belongs": True}, {"id": "p9", "belongs": False, "reason": "cats"}]}],
+                 "setups": [{"id": "p6", "supported": False, "reason": "adds a merger not in the card"}]}
         write = {"stories": [{"index": 0, "headline": "Buybacks", "body":
                               'The Treasury moved [p1]. One said "post number 2 about the treasury" [p2].\n\n'
                               'Another said "a sentence nobody wrote anywhere" [p3]. It was big [p3].'}]}
@@ -214,6 +215,7 @@ class BuildTest(unittest.TestCase):
         self.assertTrue(any("p99" in i for i in data["issues"]))
         self.assertEqual({e.get("id") for e in data["entries"][1:]}, {"p4", "p5", "p6"})
         self.assertAlmostEqual(data["cost_usd"], 0.004)
+        self.assertEqual(next(e for e in data["entries"] if e.get("id") == "p6")["setup"], "")  # unsupported setup dropped
 
     def test_trims_to_reading_budget(self):
         long = " ".join(["word"] * 85)

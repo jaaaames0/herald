@@ -62,9 +62,15 @@
   {{ media(p.media) }}
   {{ link_card(p.card) }}
   {% if not p.card and p.links %}<a class="link" href="{{ p.links[0] }}" target="_blank" rel="noopener noreferrer"><div class="dom">{{ p.links[0].split('/')[2] if '//' in p.links[0] else '' }}</div><div>{{ p.links[0][:80] }}</div></a>{% endif %}
-  {% for t in p.thread or [] %}
+  {% set thread = p.thread or [] %}
+  {% for t in thread[:thread_shown] %}
   <div class="thread">{{ text_block(t.text) }}{{ media(t.media) }}{{ link_card(t.card) }}</div>
   {% endfor %}
+  {% if thread | length > thread_shown %}
+  <details class="sources"><summary>show thread ({{ thread | length - thread_shown }} more)</summary>
+    {% for t in thread[thread_shown:] %}<div class="thread">{{ text_block(t.text) }}{{ media(t.media) }}{{ link_card(t.card) }}</div>{% endfor %}
+  </details>
+  {% endif %}
   {{ quoted(p.quoted) }}
   <div class="stats">♥ {{ p.metrics.likes | compact }} · ↻ {{ p.metrics.retweets | compact }}{% if p.retweeted_by %} · retweeted by {% for h in p.retweeted_by[:3] %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</div>
 </article>

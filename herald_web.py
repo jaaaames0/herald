@@ -80,7 +80,7 @@ def image_src(url):
 
 
 app.jinja_env.filters.update(local=local, compact=compact, post_html=post_html, image_src=image_src)
-app.jinja_env.globals.update(fold=fold, prose_html=prose_html)
+app.jinja_env.globals.update(fold=fold, prose_html=prose_html, thread_shown=herald_render_text.THREAD_SHOWN)
 
 
 def next_digest(now=None):
