@@ -1,0 +1,43 @@
+[Unit]
+Description=Herald morning digest (06:00 Sydney; covers 14:00-06:00)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=herald-worker
+Group=herald
+SupplementaryGroups=herald-worker
+UMask=0007
+WorkingDirectory=/usr/local/lib/herald/@RELEASE@
+EnvironmentFile=/etc/herald/worker.env
+Environment=HOME=/var/lib/herald
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 herald.py digest --slot morning
+StandardOutput=append:/var/log/herald/digest.log
+StandardError=append:/var/log/herald/digest.log
+TimeoutStartSec=20min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+RemoveIPC=true
+KeyringMode=private
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/herald
+ReadWritePaths=/var/lib/herald /var/log/herald
+InaccessiblePaths=/data/security-backups

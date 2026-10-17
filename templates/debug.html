@@ -1,67 +1,15 @@
 {% extends "base.html" %}
-{% block title %}debug — herald{% endblock %}
+{% block title %}herald · debug{% endblock %}
 {% block content %}
-
-<div class="cover">
-  <h1>debug</h1>
-  <div class="cover-meta">
-    <span>last 30 pipeline runs</span>
-    <span>db: /var/lib/herald/herald.db</span>
-  </div>
-</div>
-
-<div class="status-banner">
-  <div class="status-item">
-    <span class="label">last digest</span>
-    <span class="value">
-      {% if last_digest %}#{{ last_digest.id }} &middot; {{ ago(last_digest.generated_at) }} &middot; {{ last_digest.story_count }} stor{{ 'y' if last_digest.story_count == 1 else 'ies' }}{% else %}none{% endif %}
-    </span>
-  </div>
-  <div class="status-item">
-    <span class="label">last collect</span>
-    <span class="value">
-      {% if last_collect %}{{ ago(last_collect.finished_at or last_collect.started_at) }} &middot; {{ last_collect.status }}{% if last_collect.rows_out %} &middot; {{ last_collect.rows_out }} post{{ '' if last_collect.rows_out == 1 else 's' }}{% endif %}{% else %}none{% endif %}
-    </span>
-  </div>
-</div>
-
-{% if runs %}
-<table class="runs-table">
-  <thead>
-    <tr>
-      <th>id</th>
-      <th>step</th>
-      <th>started</th>
-      <th>duration</th>
-      <th>status</th>
-      <th>rows</th>
-      <th>tokens (in/out)</th>
-      <th>cost</th>
-      <th>model</th>
-      <th>error</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for r in runs %}
-    <tr>
-      <td>{{ r.id }}</td>
-      <td class="step">{{ r.step }}</td>
-      <td class="ts">{{ r.started_str }}</td>
-      <td class="ts">{{ r.duration_str }}</td>
-      <td class="status-{{ r.status }}">{{ r.status }}</td>
-      <td>{{ (r.rows_in or '—') }}/{{ (r.rows_out or '—') }}</td>
-      <td class="ts">{{ r.tokens_str or '—' }}</td>
-      <td class="ts">{{ r.cost_str or '—' }}</td>
-      <td class="ts">{{ r.model or '—' }}</td>
-      <td class="err">{{ r.error or '' }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
+<h1 style="font-size:22px">Pipeline</h1>
+<table>
+<tr><th>when</th><th>step</th><th>status</th><th>secs</th><th>cost</th><th>detail</th></tr>
+{% for r in runs %}<tr><td>{{ r.when }}</td><td>{{ r.step }}</td><td class="{{ 'ok' if r.status == 'ok' else 'bad' }}">{{ r.status }}</td><td>{{ r.secs if r.secs is not none else "" }}</td><td>{% if r.cost_usd %}${{ "%.4f" | format(r.cost_usd) }}{% endif %}</td><td>{{ (r.detail or "")[:140] }}</td></tr>{% endfor %}
 </table>
-{% else %}
-<div class="empty">
-  <h3>no pipeline runs yet</h3>
-</div>
-{% endif %}
-
+<h2 style="font-size:18px; margin-top:28px">Recent captures</h2>
+<table>
+<tr><th>when</th><th>cards</th><th>posts</th><th>new</th><th>span (h)</th></tr>
+{% for c in caps %}<tr><td>{{ c.when }}</td><td>{{ c.cards }}</td><td>{{ c.posts }}</td><td>{{ c.new_posts }}</td><td>{{ c.span_h }}</td></tr>{% endfor %}
+</table>
+<p style="color:var(--muted); font-size:14px">A capture's span should exceed the 2-hour collection interval; if it doesn't, the feed is being clipped.</p>
 {% endblock %}

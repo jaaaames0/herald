@@ -1,0 +1,10 @@
+[Unit]
+Description=Herald afternoon digest at 14:00 Australia/Sydney
+
+[Timer]
+OnCalendar=*-*-* 14:00:00 Australia/Sydney
+Persistent=true
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

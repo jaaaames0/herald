@@ -1,0 +1,10 @@
+[Unit]
+Description=Herald collect every two hours (:50 past odd hours Sydney time, so a capture lands just before each digest)
+
+[Timer]
+OnCalendar=*-*-* 01,03,05,07,09,11,13,15,17,19,21,23:50:00 Australia/Sydney
+Persistent=false
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

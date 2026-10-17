@@ -1,164 +1,39 @@
 {% extends "base.html" %}
-{% block title %}digest #{{ d.id }} — herald{% endblock %}
+{% from "_card.html" import card %}
+{% block title %}herald · {{ title }} · {{ date }}{% endblock %}
 {% block content %}
+<header class="digest">
+  <h1>{{ title }}, {{ date }}</h1>
+  <div class="meta">{{ since }} – {{ until }} · {{ data.window.posts }} posts from {{ data.window.authors }} accounts · ~{{ minutes }} min</div>
+</header>
 
-<div class="cover">
-  <h1>digest #{{ d.id }}</h1>
-  <div class="cover-meta">
-    <span><strong>window</strong> {{ d.period_start_str }} → {{ d.period_end_str }}{% if d.window_hours %} ({{ '%g'|format(d.window_hours) }}h){% endif %}</span>
-    <span><strong>generated</strong> {{ d.generated_str }}</span>
-    {% if d.edition_meta %}
-    <span><strong>timeline cards</strong> {{ d.edition_meta.shown }}</span>
-    <span><strong>captured</strong> {{ d.edition_meta.captured }}</span>
-    {% else %}
-    <span><strong>stories</strong> {{ d.stories|length }}</span>
-    {% if d.input_post_ids %}<span><strong>candidates</strong> {{ d.input_post_ids|length }} post{{ '' if d.input_post_ids|length == 1 else 's' }}</span>{% endif %}
+{% if data.mood %}<div class="mood">{{ prose_html(data.mood, posts, onpage) }}</div>{% endif %}
+
+{% for e in data.entries %}
+  {% if e.type == "story" %}
+  <section class="entry story">
+    <h2>{{ e.headline }}</h2>
+    <div class="body">{{ prose_html(e.body, posts, onpage) }}</div>
+    {% for sid in e.feature or [] %}{{ card(posts[sid], sid) }}{% endfor %}
+    {% set rest = e.posts | reject("in", e.feature or []) | list %}
+    {% if rest %}
+    <details class="sources"><summary>{{ rest | length }} more post{{ "s" if rest|length != 1 }} in this story</summary>
+      {% for sid in rest %}{{ card(posts[sid], sid, compact=True) }}{% endfor %}
+    </details>
     {% endif %}
-  </div>
-  {% if d.model_versions %}
-  <div class="cover-meta" style="margin-top: 0.4rem;">
-    {% for mv in d.model_versions %}<span><strong>model</strong> {{ mv }}</span>{% endfor %}
-  </div>
+  </section>
+  {% elif e.type == "run" %}
+  <section class="entry run">
+    {% if e.setup %}<p class="setup">{{ e.setup }}</p>{% endif %}
+    {% for sid in e.ids %}{{ card(posts[sid], sid) }}{% endfor %}
+  </section>
+  {% else %}
+  <section class="entry post">
+    {% if e.setup %}<p class="setup">{{ e.setup }}</p>{% endif %}
+    {{ card(posts[e.id], e.id) }}
+  </section>
   {% endif %}
-</div>
+{% endfor %}
 
-{% if d.edition_meta %}
-<div class="section">
-  <span class="section-label">front page · selected from your timeline</span>
-  {% if d.edition_clusters %}
-  <div class="themes">
-    {% for c in d.edition_clusters %}
-    <div class="theme"><div class="theme-label">{{ c.label }}</div>{% if c.note %}<div class="theme-desc">{{ c.note }}</div>{% endif %}</div>
-    {% endfor %}
-  </div>
-  {% else %}<div class="section-sub">No editorial grouping was needed for this window.</div>{% endif %}
-</div>
-
-{% if d.research_brief %}
-<div class="section">
-  <span class="section-label">what happened · researched separately from X</span>
-  <article class="story">
-    <div class="story-head"><span class="story-headline">{{ d.research_brief.lead_label }}</span></div>
-    <div class="story-body">{{ d.research_brief.body_html|safe }}</div>
-    <div class="sources"><div class="sources-label">external research sources</div>
-    {% for source in d.research_brief.sources %}<div class="source"><a href="{{ source.url }}" target="_blank" rel="noopener">[source:{{ loop.index }}] {{ source.title or source.url }}</a>{% if source.excerpt %}<div class="source-text">{{ source.excerpt }}</div>{% endif %}</div>{% endfor %}
-    </div>
-  </article>
-</div>
-{% endif %}
-
-<div class="section">
-  <span class="section-label">your timeline · direct posts</span>
-  <div class="stories">
-  {% for card in d.edition_cards %}
-  <article class="story {% if card.section == 'front' %}story-item{% endif %}">
-    <div class="source-head"><span class="source-author">@{{ card.author_handle or '?' }}</span><span class="source-time">{{ card.created_str }}</span><a class="source-id" href="https://x.com/i/web/status/{{ card.external_id }}" target="_blank" rel="noopener">[{{ card.external_id[:10] }}…]</a></div>
-    {% if card.post_type == 'retweet' and card.amplified_by %}<div class="story-angle">amplified by @{{ card.amplified_by.username or card.author_handle }}</div>{% endif %}
-    <div class="story-body"><p>{{ card.text }}</p></div>
-    {% if card.context_posts %}<div class="sources"><div class="sources-label">fetched context</div>{% for context in card.context_posts %}<div class="source"><span class="source-author">@{{ context.author or '?' }}</span> <a href="https://x.com/i/web/status/{{ context.id }}" target="_blank" rel="noopener">[{{ context.id[:10] }}…]</a><div class="source-text">{{ context.text }}</div></div>{% endfor %}</div>{% endif %}
-    {% if card.metrics_str %}<div class="source-metrics">{{ card.metrics_str }}</div>{% endif %}
-  </article>
-  {% endfor %}
-  </div>
-</div>
-
-<div class="section">
-  <span class="section-label">coverage ledger</span>
-  <div class="cover-meta">
-    <span><strong>captured</strong> {{ d.edition_meta.captured }}</span><span><strong>unique</strong> {{ d.edition_meta.unique }}</span><span><strong>shown</strong> {{ d.edition_meta.shown }}</span><span><strong>collapsed / omitted</strong> {{ d.edition_meta.collapsed_or_omitted }}</span><span><strong>context reads</strong> {{ d.edition_meta.context_reads }}/12</span><span><strong>research</strong> {{ d.edition_meta.research }}</span>
-  </div>
-</div>
-{% else %}
-
-{# ─── ZEITGEIST ─── #}
-{% if d.zeitgeist %}
-<div class="section">
-  <span class="section-label">zeitgeist &middot; what’s moving in the timeline</span>
-  <div class="themes">
-    {% for th in d.zeitgeist %}
-    {% set sal = th.salience if th.salience else 'low' %}
-    <div class="theme">
-      <div class="theme-label">
-        <span class="theme-mark {% if sal == 'low' %}low{% endif %}">{{ salience_mark(sal) }}</span>
-        <span>{{ th.label }}</span>
-        <span class="theme-accounts">&middot; {{ sal }} salience</span>
-      </div>
-      <div class="theme-desc">{{ th.description or '' }}</div>
-      {% if th.accounts %}
-      <div class="theme-accounts">
-        accounts:
-        {% for a in th.accounts %}<span class="acc">@{{ a }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
-      </div>
-      {% endif %}
-      {% if th.why_it_matters %}
-      <div class="theme-accounts" style="margin-top: 0.25rem;">{{ th.why_it_matters }}</div>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-</div>
-{% endif %}
-
-{# ─── STORIES ─── #}
-<div class="section">
-  <span class="section-label">stories</span>
-  <div class="stories">
-    {% for s in d.stories %}
-    {# Phase 3.8: items are single-post picks from the editor's `items` list.
-       They render inline with stories but with lighter visual weight. The
-       `post_count == 1` check catches both kinds of single-post entries;
-       theme_label-based fallback covers multi-post items if we ever add them. #}
-    {% set is_item = (s.post_count == 1) or (s.theme_label and s.theme_label in ['news','humor','quote','meme','off-beat','link','sidebar','observation','thread-anchor','item','political']) %}
-    <article class="story {% if is_item %}story-item{% endif %}">
-      <div class="story-head">
-        <span class="story-num">{% if not is_item %}{{ loop.index }}.{% endif %}</span>
-        <span class="story-headline">{{ s.headline }}</span>
-        {% if s.topic %}<span class="story-topic">{{ s.topic }}</span>{% endif %}
-      </div>
-      {% if s.angle %}
-      <div class="story-angle">{{ s.angle }}</div>
-      {% endif %}
-      <div class="story-body">{{ s.story_html|safe }}</div>
-
-      {% if s.posts %}
-      <div class="sources">
-        <div class="sources-label">sources ({{ s.posts|length }})</div>
-        {% for lp in s.posts %}
-        <div class="source">
-          <div class="source-head">
-            <span class="source-author">@{{ lp.author_handle or '?' }}</span>
-            <span class="source-time">{{ lp.created_str }}</span>
-            <a class="source-id" href="https://x.com/i/web/status/{{ lp.external_id }}" target="_blank" rel="noopener">[{{ lp.external_id[:10] }}…]</a>
-          </div>
-          <span class="source-text">{{ lp.text }}</span>
-          {% if lp.metrics_str %}<div class="source-metrics">{{ lp.metrics_str }}</div>{% endif %}
-        </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-
-      {% if s.key_quotes %}
-      <div class="key-quotes">
-        <div class="sources-label">key quotes</div>
-        {% for kq in s.key_quotes %}
-        {% if kq is mapping %}
-        <div class="key-quote">
-          “{{ kq.quote or '' }}”
-          <span class="key-quote-speaker">— @{{ kq.speaker or '?' }}{% if kq.post_id %} · <a href="https://x.com/i/web/status/{{ kq.post_id }}" target="_blank" rel="noopener" style="color: var(--muted);">{{ kq.post_id[:10] }}…</a>{% endif %}</span>
-        </div>
-        {% endif %}
-        {% endfor %}
-      </div>
-      {% endif %}
-    </article>
-    {% endfor %}
-  </div>
-</div>
-
-<p style="margin-top: 3rem; color: var(--muted); font-size: 0.72rem;">
-  <a href="{{ url_for('index') }}">← all digests</a>
-</p>
-
-{% endif %}
-
+<footer class="done"><b>You're caught up.</b><br>Next digest {{ next_digest }}.</footer>
 {% endblock %}

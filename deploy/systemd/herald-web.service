@@ -1,0 +1,43 @@
+[Unit]
+Description=Herald Web UI (gunicorn on 127.0.0.1:8060)
+After=network.target
+
+[Service]
+Type=exec
+User=herald-web
+Group=herald
+SupplementaryGroups=herald-web
+UMask=0007
+WorkingDirectory=/usr/local/lib/herald/@RELEASE@
+EnvironmentFile=/etc/herald/web.env
+Environment=HOME=/var/lib/herald
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/local/lib/herald/@RELEASE@/venv/bin/python -m gunicorn -w 2 -b 127.0.0.1:8060 --access-logfile /var/log/herald/access.log --error-logfile /var/log/herald/error.log --log-level info herald_web:app
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+RemoveIPC=true
+KeyringMode=private
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/herald
+ReadWritePaths=/var/lib/herald /var/log/herald
+InaccessiblePaths=/data/security-backups

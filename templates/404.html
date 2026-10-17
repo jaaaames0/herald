@@ -1,9 +1,2 @@
 {% extends "base.html" %}
-{% block title %}404 — herald{% endblock %}
-{% block content %}
-<div class="error-page">
-  <h1>404</h1>
-  <p>no such digest.</p>
-  <p style="margin-top: 1.5rem;"><a href="{{ url_for('index') }}">← back to latest</a></p>
-</div>
-{% endblock %}
+{% block content %}<p>Not found. <a href="/">Latest digest</a></p>{% endblock %}

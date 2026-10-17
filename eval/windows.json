@@ -1,0 +1,5 @@
+{
+  "aug19-us":    {"store": "/tmp/herald-eval/aug19-us.db",    "start": "2026-08-19T04:00:00+00:00", "end": "2026-08-19T20:00:00+00:00", "note": "US session; record BTC short liquidation, Treasury buybacks, Moderna, Chauvin"},
+  "aug20-pm":    {"store": "/tmp/herald-eval/aug20-pm.db",    "start": "2026-08-20T20:00:00+00:00", "end": "2026-08-21T04:00:00+00:00", "note": "US evening; Saylor/STRC aftermath, Cambridge/Ghent plagiarism saga, data centres"},
+  "aug16-wkend": {"store": "/tmp/herald-eval/aug16-wkend.db", "start": "2026-08-16T04:00:00+00:00", "end": "2026-08-16T20:00:00+00:00", "note": "quiet weekend US session"}
+}

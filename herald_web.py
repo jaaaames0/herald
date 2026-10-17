@@ -1,255 +1,150 @@
-"""herald_web.py — Herald's Flask web UI.
+"""Herald web UI: the digest is the page.
 
-Routes:
-  GET /                       list of recent digests (newest first)
-  GET /digest/<id>            render one digest in full
-  GET /debug                  pipeline_runs status (last 20 runs)
-
-No auth — Herald serves public-domain-source material that's already on X,
-and there's nothing to hide. Personal tool for James.
-
-Runs under gunicorn on 127.0.0.1:8060; nginx terminates TLS and proxies.
+Routes: /  (latest digest)   /d/<id>   /archive   /debug
+Read-only. Posts are rendered from the stored digest, never rewritten.
 """
-import datetime as _dt
+
 import html
-import json
 import os
-import secrets
-import sys
-from pathlib import Path
+import re
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from flask import Flask, abort, render_template, request
+from flask import Flask, abort, render_template
+from markupsafe import Markup
 
-# Ensure local module imports work under gunicorn
-HERE = Path(__file__).parent
-sys.path.insert(0, str(HERE))
+import herald_env
 
-import herald_db  # noqa: E402
+herald_env.load()
+
+import herald_render_text  # noqa: E402
+import herald_store  # noqa: E402
+
+TZ = ZoneInfo(os.environ.get("HERALD_TZ", "Australia/Sydney"))
+SLOT_HOURS = {"morning": 6, "afternoon": 14}
 
 app = Flask(__name__)
-REVIEW_PASSWORD = os.environ.get("HERALD_REVIEW_PASSWORD", "")
+
+URL = re.compile(r"https?://[^\s<>\"']+")
+MENTION = re.compile(r"(?<![\w/])@(\w{1,15})")
+CITE = re.compile(r"\[([pr]\d+)\]")
 
 
-@app.context_processor
-def inject_globals():
-    """Inject helpers into every Jinja2 template."""
-    return {
-        "now_year": _dt.datetime.now(tz=_dt.timezone.utc).year,
-        "ts": _ts,
-        "ago": _ago,
-        "review_enabled": bool(REVIEW_PASSWORD),
-    }
+def local(ts, fmt="%a %-I:%M%p"):
+    return datetime.fromtimestamp(ts, TZ).strftime(fmt).replace("AM", "am").replace("PM", "pm") if ts else ""
 
 
-# ── helpers ──
-
-def _ts(unix):
-    if not unix:
-        return "—"
-    return _dt.datetime.fromtimestamp(unix, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+def compact(n):
+    n = n or 0
+    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{n / 1000:.1f}k" if n >= 10_000 else str(n)
 
 
-def _ago(unix):
-    if not unix:
-        return ""
-    delta = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.datetime.fromtimestamp(unix, tz=_dt.timezone.utc)
-    secs = int(delta.total_seconds())
-    if secs < 60: return f"{secs}s ago"
-    if secs < 3600: return f"{secs // 60}m ago"
-    if secs < 86400: return f"{secs // 3600}h ago"
-    return f"{secs // 86400}d ago"
+def post_html(text):
+    """Escape post text, then link URLs and @mentions."""
+    out = html.escape(text or "", quote=False)
+    out = URL.sub(lambda m: f'<a href="{m.group(0)}" rel="noopener noreferrer" target="_blank">'
+                  f'{re.sub(r"^https?://(www\.)?", "", m.group(0))[:48]}</a>', out)
+    out = MENTION.sub(lambda m: f'<a href="https://x.com/{m.group(1)}" target="_blank" rel="noopener">@{m.group(1)}</a>', out)
+    return Markup(out)
 
 
-def _duration(start, end):
-    if not start or not end:
-        return ""
-    secs = end - start
-    if secs < 60: return f"{secs}s"
-    if secs < 3600: return f"{secs // 60}m {secs % 60}s"
-    return f"{secs // 3600}h {(secs % 3600) // 60}m"
+def prose_html(text, posts, onpage=()):
+    """Editor/writer prose: escape, paragraphs, and turn [p12] into a link to the source.
 
-
-def _salience_mark(s):
-    return {"high": "★", "medium": "●", "low": "○"}.get(s or "", "·")
-
-
-def _fmt_metrics(m):
-    if not m: return ""
-    if isinstance(m, str):
-        try: m = json.loads(m)
-        except: return ""
-    parts = []
-    for k in ("likes", "retweets", "replies"):
-        v = m.get(k)
-        if v is not None:
-            parts.append(f"{v} {k}")
-    return " · ".join(parts) if parts else ""
-
-
-def _format_story(story_text):
-    """Inline-format a story's prose for HTML. Preserves paragraph breaks.
-
-    [post:ID] markers become hover-able citations linking to x.com.
-    Inline "quoted text" — @author are highlighted.
+    Sources shown on the page are linked in place; others open the post on X.
     """
-    if not story_text:
-        return ""
-    # Escape HTML first
-    text = html.escape(story_text)
-    # Replace [post:ID] with a styled citation chip linking to x.com
-    import re as _re
-    text = _re.sub(
-        r"\[post:([A-Za-z0-9_:\.\-]+)\]",
-        lambda m: f'<a class="cite" href="https://x.com/i/web/status/{m.group(1)}" target="_blank" rel="noopener" title="post {m.group(1)}">[{m.group(1)[:8]}\u2026]</a>',
-        text,
-    )
-    # Bold inline quotes: "..." — @author
-    text = _re.sub(
-        r"\u201c([^\u201d]+?)\u201d\s*\u2014\s*@(\w+)",
-        lambda m: f'<span class="quote">\u201c{m.group(1)}\u201d</span> <span class="quote-author\">\u2014 @{m.group(2)}</span>',
-        text,
-    )
-    # Paragraphs on \n\n
-    paragraphs = text.split("\n\n")
-    return "\n".join(f"<p>{p.replace(chr(10), ' ')}</p>" for p in paragraphs if p.strip())
+    def cite(m):
+        sid = m.group(1)
+        p = posts.get(sid)
+        if not p:
+            return ""
+        handle = html.escape(p["author"]["handle"])
+        if sid in onpage:
+            return f'<a class="cite" href="#{sid}" data-sid="{sid}">@{handle}</a>'
+        return f'<a class="cite" href="{html.escape(p["url"])}" target="_blank" rel="noopener">@{handle}</a>'
+    paras = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
+    return Markup("".join(f"<p>{CITE.sub(cite, html.escape(p, quote=False))}</p>" for p in paras))
 
 
-def _format_research(text):
-    """Escape research prose while styling its validated [source:N] markers."""
-    import re as _re
-    escaped = html.escape(text or "")
-    escaped = _re.sub(r"\[source:(\d+)\]", r'<span class="cite">[source:\1]</span>', escaped)
-    return "".join(f"<p>{p}</p>" for p in escaped.split("\n\n") if p.strip())
+def fold(text, words=herald_render_text.FOLD_WORDS):
+    parts = (text or "").split(" ")
+    if len(parts) <= words:
+        return text, ""
+    return " ".join(parts[:words]), " ".join(parts[words:])
 
 
-def _require_review_access():
-    """Keep unpublished desk material out of the public Herald site.
-
-    The review interface is deliberately disabled unless an operator supplies
-    a password via the service environment. HTTP Basic is browser-native and
-    avoids putting a review secret in URLs or templates.
-    """
-    if not REVIEW_PASSWORD:
-        abort(404)
-    auth = request.authorization
-    if not auth or auth.username != "herald" or not secrets.compare_digest(auth.password or "", REVIEW_PASSWORD):
-        return False
-    return True
+def image_src(url):
+    if "pbs.twimg.com/media/" in url and "?" not in url:
+        return url + "?name=small"
+    return url
 
 
-def _review_challenge():
-    return ("Review access required", 401, {"WWW-Authenticate": 'Basic realm="Herald review"'})
+app.jinja_env.filters.update(local=local, compact=compact, post_html=post_html, image_src=image_src)
+app.jinja_env.globals.update(fold=fold, prose_html=prose_html)
 
 
-# ── routes ──
+def next_digest(now=None):
+    now = now or datetime.now(TZ)
+    for days in (0, 1):
+        for h in sorted(SLOT_HOURS.values()):
+            t = (now + timedelta(days=days)).replace(hour=h, minute=0, second=0, microsecond=0)
+            if t > now:
+                return t.strftime("%a %-I%p").replace("AM", "am").replace("PM", "pm")
+    return ""
+
+
+def render_digest(d):
+    data = d["data"]
+    end = datetime.fromtimestamp(d["period_end"], TZ)
+    title = {"morning": "Morning", "afternoon": "Afternoon"}.get(d["slot"], d["slot"].capitalize())
+    onpage = set()
+    for e in data["entries"]:
+        onpage.update(e.get("posts") or e.get("ids") or [e.get("id")])
+    return render_template(
+        "digest.html", d=d, data=data, posts=data["posts"], onpage=onpage, title=title,
+        date=end.strftime("%A %-d %B"), since=local(d["period_start"], "%a %-I%p"), until=local(d["period_end"], "%a %-I%p"),
+        minutes=round(herald_render_text.reading_minutes(data)), next_digest=next_digest())
+
 
 @app.route("/")
 def index():
-    conn = herald_db.get_connection()
-    issues = herald_db.list_public_story_issues(conn, limit=20)
-    for issue in issues:
-        issue["published_ago"] = _ago(issue["published_at"])
-        issue["published_str"] = _ts(issue["published_at"])
-    conn.close()
-    return render_template("index.html", issues=issues)
+    conn = herald_store.connect()
+    d = herald_store.get_digest(conn)
+    if not d:
+        return render_template("empty.html", next_digest=next_digest())
+    return render_digest(d)
 
 
-@app.route("/issue/<int:issue_id>")
-def issue(issue_id):
-    conn = herald_db.get_connection()
-    try:
-        data = herald_db.get_story_issue(conn, issue_id)
-    finally:
-        conn.close()
-    if data.get("state") != "published":
-        abort(404)
-    for item in data.get("items") or []:
-        item["story_html"] = _format_story(item.get("story") or "")
-    data["published_str"] = _ts(data.get("published_at"))
-    return render_template("issue.html", issue=data)
-
-
-@app.route("/digest/<int:digest_id>")
+@app.route("/d/<int:digest_id>")
 def digest(digest_id):
-    conn = herald_db.get_connection()
-    d = herald_db.get_edition(conn, digest_id)
-    conn.close()
+    conn = herald_store.connect()
+    d = herald_store.get_digest(conn, digest_id)
     if not d:
         abort(404)
-    # Pre-format stories for HTML rendering
-    for s in d.get("stories") or []:
-        s["story_html"] = _format_story(s.get("story") or "")
-        # Format created_at on linked posts
-        for lp in s.get("posts") or []:
-            lp["created_str"] = _ts(lp.get("created_at"))
-            lp["metrics_str"] = _fmt_metrics(lp.get("metrics"))
-        # Decode key_quotes if JSON string
-        kq = s.get("key_quotes")
-        if isinstance(kq, str):
-            try: s["key_quotes"] = json.loads(kq)
-            except: s["key_quotes"] = []
-    for card in d.get("edition_cards") or []:
-        card["created_str"] = _ts(card.get("created_at"))
-        card["metrics_str"] = _fmt_metrics(card.get("metrics"))
-    if d.get("research_brief"):
-        d["research_brief"]["body_html"] = _format_research(d["research_brief"].get("body"))
-    d["generated_str"] = _ts(d["generated_at"])
-    d["period_start_str"] = _ts(d["period_start"])
-    d["period_end_str"] = _ts(d["period_end"])
-    return render_template("digest.html", d=d, fmt_metrics=_fmt_metrics, salience_mark=_salience_mark)
+    return render_digest(d)
 
 
-@app.route("/desk")
-def desk():
-    if not _require_review_access():
-        return _review_challenge()
-    conn = herald_db.get_connection()
-    try:
-        issues = herald_db.list_story_issues(conn)
-        queue = herald_db.list_story_review_queue(conn)
-        for issue in issues:
-            issue["created_str"] = _ts(issue["created_at"])
-            issue["created_ago"] = _ago(issue["created_at"])
-        for candidate in queue:
-            candidate["last_seen_str"] = _ts(candidate["last_seen"])
-            candidate["draft_ago"] = _ago(candidate.get("draft_created_at"))
-    finally:
-        conn.close()
-    return render_template("desk.html", issues=issues, queue=queue)
-
-
-@app.route("/desk/issue/<int:issue_id>")
-def desk_issue(issue_id):
-    if not _require_review_access():
-        return _review_challenge()
-    conn = herald_db.get_connection()
-    try:
-        issue = herald_db.get_story_issue(conn, issue_id)
-    finally:
-        conn.close()
-    for item in issue.get("items") or []:
-        item["story_html"] = _format_story(item.get("story") or "")
-    issue["created_str"] = _ts(issue["created_at"])
-    return render_template("desk_issue.html", issue=issue)
+@app.route("/archive")
+def archive():
+    conn = herald_store.connect()
+    rows = herald_store.list_digests(conn)
+    for r in rows:
+        r["when"] = local(r["period_end"], "%a %-d %b, %-I%p")
+    return render_template("archive.html", rows=rows)
 
 
 @app.route("/debug")
 def debug():
-    conn = herald_db.get_connection()
-    runs = herald_db.list_pipeline_runs(conn, limit=30)
-    # Add duration + ago columns
+    conn = herald_store.connect()
+    runs = herald_store.recent_runs(conn)
     for r in runs:
-        r["started_str"] = _ts(r["started_at"])
-        r["finished_str"] = _ts(r["finished_at"])
-        r["duration_str"] = _duration(r["started_at"], r["finished_at"])
-        r["ago_str"] = _ago(r["finished_at"] or r["started_at"])
-        r["cost_str"] = f"${(r['cost_usd'] or 0):.6f}" if r.get("cost_usd") else ""
-        r["tokens_str"] = f"{(r['prompt_tokens'] or 0):,}/{ (r['completion_tokens'] or 0):,}" if r.get("prompt_tokens") else ""
-    # Last digest + last collect for status banner
-    last_digest = conn.execute("SELECT id, generated_at, story_count FROM digests ORDER BY id DESC LIMIT 1").fetchone()
-    last_collect = conn.execute("SELECT * FROM pipeline_runs WHERE step='ingest' ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
-    return render_template("debug.html", runs=runs, last_digest=last_digest, last_collect=last_collect, ts=_ts, ago=_ago)
+        r["when"] = local(r["started_at"], "%a %-d %b %H:%M")
+        r["secs"] = (r["finished_at"] - r["started_at"]) if r["finished_at"] else None
+    caps = [dict(r) for r in conn.execute("SELECT * FROM captures ORDER BY id DESC LIMIT 12")]
+    for c in caps:
+        c["when"] = local(c["captured_at"], "%a %H:%M")
+        c["span_h"] = round((c["captured_at"] - c["oldest_seen_at"]) / 3600, 1) if c["oldest_seen_at"] else None
+    return render_template("debug.html", runs=runs, caps=caps)
 
 
 @app.errorhandler(404)
@@ -258,5 +153,4 @@ def not_found(e):
 
 
 if __name__ == "__main__":
-    # Dev server only — production runs under gunicorn (see herald-web.service)
-    app.run(host="127.0.0.1", port=8060, debug=False)
+    app.run(host="127.0.0.1", port=int(os.environ.get("HERALD_WEB_PORT", "8060")), debug=False)

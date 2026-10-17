@@ -4,6 +4,38 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 
 ---
 
+## 2026-10-17 — Reset: feed-first digest (diagnosis, eval, rebuild)
+
+**Diagnosis** (read-only, August database and logs):
+- Nothing had run since 2026-08-22; the last digest died on an OpenRouter 402
+  (credits exhausted). The production writer had been Claude Sonnet 4.6, not
+  gpt-oss-120b as documented. No `/digest/<id>` page views after 2026-07-27;
+  since the 2026-08-31 release the homepage showed "0 published issues".
+- Collection ran every 4 minutes (360 bird requests/day) for ~700 unique posts
+  a day; one 200-card read spans ~20 hours.
+- Value was lost at selection: the 40-post engagement pre-filter dropped whole
+  multi-account conversations (2026-08-19: the record BTC short liquidation
+  never reached the editor). Digests were 350–970 words (2–4 minutes).
+- Quoted text (209/209) and reply parents (109/126) were collected but dropped
+  downstream; 2 of 204 daily photos were read; link cards were discarded.
+
+**Rebuild:** whole-window editor over cards with full click-through context;
+image reading for every photo; a grouping check; verbatim-quote and citation
+validation with one revision; reading-time trimming; X-like web cards rendered
+from storage; collection every 2h with bounded chain completion. Old pipelines
+(embed/cluster, two-stage, evidence, desk, edition, narrative) deleted; new DB
+`herald-feed.db`; NanoGPT replaces OpenRouter. ~10k → ~1.7k lines.
+
+**Eval:** 3 August windows with human references (`eval/reference/`), 9 models
+over 4 rounds, ~$2.60 of credit. Pipeline bugs found by the eval and fixed:
+story/draft index mismatch, quote mis-pairing and nested quotes, a checker
+model that inverted its verdicts, unbounded runs, single-quote loophole,
+`[p1, p2]` citations. Final configuration: plan DeepSeek V4.1 Flash, check
+Claude Haiku 5.5, vision Qwen 3.7 Flash; writer chosen by James from the
+Sonnet 5.5 / Kimi K2.6 side-by-side.
+
+---
+
 ## 2026-07-10 — PR 2: code health refactors (MR-1, MR-4, MR-6)
 
 Three small refactors deferred from the 2026-07-09 code health audit.

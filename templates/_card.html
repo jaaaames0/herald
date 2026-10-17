@@ -1,0 +1,71 @@
+{% macro text_block(t) -%}
+{%- set head, rest = fold(t) -%}
+<div class="text">{{ head | post_html }}{% if rest %}<details><summary> … show more</summary>{{ (" " ~ rest) | post_html }}</details>{% endif %}</div>
+{%- endmacro %}
+
+{% macro media(items) -%}
+{% if items %}
+<div class="media">
+  {% for m in items %}
+  <figure>
+    {% if m.type == "photo" %}
+      <a href="{{ m.url }}?name=large" target="_blank" rel="noopener noreferrer"><img src="{{ m.url | image_src }}" alt="{{ (m.alt or (m.reading or {}).get('description') or '')[:300] }}" loading="lazy" referrerpolicy="no-referrer"></a>
+    {% else %}
+      <span class="video"><img src="{{ m.url }}" alt="video" loading="lazy" referrerpolicy="no-referrer"></span>
+    {% endif %}
+    {% set r = m.reading or {} %}
+    {% if r.get('text') %}
+    <figcaption><details><summary>text in image</summary><div class="read">{{ r.text }}</div></details></figcaption>
+    {% endif %}
+  </figure>
+  {% endfor %}
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro link_card(c) -%}
+{% if c %}
+<a class="link" href="{{ c.url }}" target="_blank" rel="noopener noreferrer"><div class="dom">{{ c.domain }}</div><div>{{ c.title }}</div>{% if c.description %}<div class="desc">{{ c.description[:220] }}</div>{% endif %}</a>
+{% endif %}
+{%- endmacro %}
+
+{% macro who(p) -%}
+<div class="who"><b>{{ p.author.name or p.author.handle }}</b><a href="https://x.com/{{ p.author.handle }}" target="_blank" rel="noopener">@{{ p.author.handle }}</a>{% if p.seen_at or p.posted_at %}<a class="time" href="{{ p.url }}" target="_blank" rel="noopener">{{ (p.posted_at or p.seen_at) | local }}</a>{% endif %}</div>
+{%- endmacro %}
+
+{% macro quoted(q, depth=0) -%}
+{% if q %}
+<div class="quote">
+  {{ who(q) }}
+  {{ text_block(q.text) }}
+  {{ media(q.media) }}
+  {{ link_card(q.card) }}
+  {% if q.quoted and depth < 3 %}{{ quoted(q.quoted, depth + 1) }}{% endif %}
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro card(p, sid=None, compact=False) -%}
+<article class="card{% if compact %} compact{% endif %}"{% if sid %} id="{{ sid }}"{% endif %}>
+  {% if p.parent %}
+  <div class="parent">
+    {% if p.parent.parent %}<div class="who">↪ @{{ p.parent.parent.author.handle }}: {{ p.parent.parent.text[:160] }}{% if p.parent.parent.text|length > 160 %}…{% endif %}</div>{% endif %}
+    {{ who(p.parent) }}
+    {{ text_block(p.parent.text) }}
+    {{ media(p.parent.media) }}
+  </div>
+  {% elif p.reply_to_handle %}
+  <div class="setup">replying to @{{ p.reply_to_handle }}</div>
+  {% endif %}
+  {{ who(p) }}
+  {{ text_block(p.text) }}
+  {{ media(p.media) }}
+  {{ link_card(p.card) }}
+  {% if not p.card and p.links %}<a class="link" href="{{ p.links[0] }}" target="_blank" rel="noopener noreferrer"><div class="dom">{{ p.links[0].split('/')[2] if '//' in p.links[0] else '' }}</div><div>{{ p.links[0][:80] }}</div></a>{% endif %}
+  {% for t in p.thread or [] %}
+  <div class="thread">{{ text_block(t.text) }}{{ media(t.media) }}{{ link_card(t.card) }}</div>
+  {% endfor %}
+  {{ quoted(p.quoted) }}
+  <div class="stats">♥ {{ p.metrics.likes | compact }} · ↻ {{ p.metrics.retweets | compact }}{% if p.retweeted_by %} · retweeted by {% for h in p.retweeted_by[:3] %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</div>
+</article>
+{%- endmacro %}
