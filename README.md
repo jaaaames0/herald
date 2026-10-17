@@ -13,7 +13,7 @@ Live at https://herald.jaaaames.com (no auth; single reader, public data).
 ## How it works
 
 ```
-every 2h   herald.py collect   one `bird home --following` read (200 cards)
+hourly     herald.py collect   one `bird home --following` read (200 cards ≈ 3–9h of feed)
                                + ≤25 `bird read`s for missing reply parents / quote levels
                                → SQLite (posts stored whole, with their chains)
 

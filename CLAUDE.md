@@ -44,7 +44,7 @@ accepted change. Units run as locked `herald-web` / `herald-worker`.
 - A story is one specific thing many accounts react to, verified by the check
   step. Topic-level grouping is the failure mode James named.
 - Cost stays around $0.05/digest or less; collection stays at one timeline read
-  per 2h plus ≤25 bounded reads (the account is cookie-authenticated; don't
+  per hour plus ≤25 bounded reads (the account is cookie-authenticated; don't
   hammer X).
 
 ## Gotchas

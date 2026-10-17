@@ -12,7 +12,8 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
   gpt-oss-120b as documented. No `/digest/<id>` page views after 2026-07-27;
   since the 2026-08-31 release the homepage showed "0 published issues".
 - Collection ran every 4 minutes (360 bird requests/day) for ~700 unique posts
-  a day; one 200-card read spans ~20 hours.
+  a day. A 200-card read reaches back ~5h (median); hourly reads see 89% of
+  what the 4-minute cadence saw, 2-hourly 84%.
 - Value was lost at selection: the 40-post engagement pre-filter dropped whole
   multi-account conversations (2026-08-19: the record BTC short liquidation
   never reached the editor). Digests were 350–970 words (2–4 minutes).
@@ -22,7 +23,7 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 **Rebuild:** whole-window editor over cards with full click-through context;
 image reading for every photo; a grouping check; verbatim-quote and citation
 validation with one revision; reading-time trimming; X-like web cards rendered
-from storage; collection every 2h with bounded chain completion. Old pipelines
+from storage; hourly collection with bounded chain completion. Old pipelines
 (embed/cluster, two-stage, evidence, desk, edition, narrative) deleted; new DB
 `herald-feed.db`; NanoGPT replaces OpenRouter. ~10k → ~1.7k lines.
 

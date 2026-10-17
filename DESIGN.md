@@ -33,7 +33,9 @@ The diagnosis (from the August database) found value lost mainly at
 *selection*: a 40-post embedding/engagement pre-filter dropped whole
 conversations spread across many accounts (on 2026-08-19 none of ~15 posts
 about the record BTC short liquidation reached the editor). Collection was
-fine but over-polled (every 4 minutes for ~2 new posts per request). Quote
+over-polled (every 4 minutes, ~2 new posts per request); measured against
+that, an hourly read sees 89% of the posts and a 2-hourly one 84% — the
+missed ones are visible in the feed for only ~25 minutes. Quote
 text and reply parents were mostly collected and then dropped; images were not
 read at all.
 
@@ -44,8 +46,8 @@ pipelines (~10k → ~1.7k lines).
 
 ## Pipeline
 
-- **Collect (every 2h)**: one `bird --quote-depth 3 home -n 200 --following
-  --json-full` (spans ~20h, so 2h cadence overlaps comfortably), then up to 25
+- **Collect (hourly)**: one `bird --quote-depth 3 home -n 200 --following
+  --json-full` (200 cards reach back ~5h at the median, ~2.7h when busy), then up to 25
   `bird read`s for reply parents and quote levels the timeline didn't include,
   most-engaged posts first. Retweets are unwrapped to the original with the
   retweeters recorded; promoted posts (old posting time, unified cards) are

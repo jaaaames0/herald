@@ -11,5 +11,5 @@
 <tr><th>when</th><th>cards</th><th>posts</th><th>new</th><th>span (h)</th></tr>
 {% for c in caps %}<tr><td>{{ c.when }}</td><td>{{ c.cards }}</td><td>{{ c.posts }}</td><td>{{ c.new_posts }}</td><td>{{ c.span_h }}</td></tr>{% endfor %}
 </table>
-<p style="color:var(--muted); font-size:14px">A capture's span should exceed the 2-hour collection interval; if it doesn't, the feed is being clipped.</p>
+<p style="color:var(--muted); font-size:14px">A capture's span should exceed the one-hour collection interval; if it doesn't, the feed is being clipped.</p>
 {% endblock %}
