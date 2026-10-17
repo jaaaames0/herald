@@ -31,7 +31,7 @@ build() {
   sudo python3 -m venv "$LIB/$rel/venv"
   sudo "$LIB/$rel/venv/bin/pip" install --quiet --no-cache-dir --require-virtualenv -r "$LIB/$rel/requirements.lock"
   sudo chown -R root:root "$LIB/$rel"
-  sudo chmod -R go-w "$LIB/$rel"
+  sudo chmod -R u=rwX,go=rX "$LIB/$rel"
   rm -rf "$stage"
   # Tests run against the release itself, with a throwaway database and no network.
   (cd /tmp && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB/$rel" "$LIB/$rel/venv/bin/python" -m unittest -q test_herald)
