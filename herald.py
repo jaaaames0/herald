@@ -33,7 +33,7 @@ SLOTS = {"morning": (6, 14), "afternoon": (14, 6)}
 MODELS = {
     "plan": os.environ.get("HERALD_PLAN_MODEL", "deepseek/deepseek-v4.1-flash"),
     "check": os.environ.get("HERALD_CHECK_MODEL", "anthropic/claude-haiku-5.5"),
-    "write": os.environ.get("HERALD_WRITE_MODEL", "moonshotai/kimi-k2.6"),
+    "write": os.environ.get("HERALD_WRITE_MODEL", "anthropic/claude-sonnet-5.5"),
 }
 
 

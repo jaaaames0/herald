@@ -4,7 +4,8 @@
 {% block content %}
 <header class="digest">
   <h1>{{ title }}, {{ date }}</h1>
-  <div class="meta">{{ since }} – {{ until }} · {{ data.window.posts }} posts from {{ data.window.authors }} accounts · ~{{ minutes }} min</div>
+  {% if covers %}<div class="covers">{{ covers }}</div>{% endif %}
+  <div class="meta">{{ since }} – {{ until }} Sydney time · {{ data.window.posts }} posts from {{ data.window.authors }} accounts · ~{{ minutes }} min</div>
 </header>
 
 {% if data.mood %}<div class="mood">{{ prose_html(data.mood, posts, onpage) }}</div>{% endif %}
@@ -24,6 +25,7 @@
   </section>
   {% elif e.type == "run" %}
   <section class="entry run">
+    <p class="kicker">{{ e.ids | length }} posts from @{{ posts[e.ids[0]].author.handle }}</p>
     {% if e.setup %}<p class="setup">{{ e.setup }}</p>{% endif %}
     {% for sid in e.ids %}{{ card(posts[sid], sid) }}{% endfor %}
   </section>

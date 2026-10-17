@@ -84,7 +84,7 @@ Chosen by the eval below (2026-10-17). All are environment-configurable.
 | Vision | `qwen/qwen3.7-flash` | OCR of screenshots/charts as good as Gemini Flash-Lite at ~1/10 the price (~$0.00007/image) |
 | Plan | `deepseek/deepseek-v4.1-flash` | Coverage equal to the best tested at ~$0.004 for a 40k-token window |
 | Check | `anthropic/claude-haiku-5.5` | DeepSeek-flash misused the schema and removed valid posts; Haiku is reliable, ~$0.002 |
-| Write | see CHANGELOG for the current choice | Sonnet 5.5 reads best (~$0.02–0.05/digest); Kimi K2.6 close behind at ~$0.005 |
+| Write | `anthropic/claude-sonnet-5.5` | James chose it over Kimi K2.6 (~5× cheaper) for better grouping, relevance and framing; ~$0.03–0.04/digest |
 
 Rejected: GLM-5.3-flash (ran out of tokens reasoning), Qwen 3.7 Plus and GPT-6
 Luna (refused real windows on "safety" grounds), Gemini 3 Flash (fine but 5–10×

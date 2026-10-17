@@ -22,6 +22,11 @@ import herald_store  # noqa: E402
 
 TZ = ZoneInfo(os.environ.get("HERALD_TZ", "Australia/Sydney"))
 SLOT_HOURS = {"morning": 6, "afternoon": 14}
+# Named for the Australian time they arrive; each covers a US session.
+EDITIONS = {
+    "morning": ("Morning edition", "the US day, overnight here"),
+    "afternoon": ("Afternoon edition", "the US evening and the Australian day"),
+}
 
 app = Flask(__name__)
 
@@ -96,12 +101,12 @@ def next_digest(now=None):
 def render_digest(d):
     data = d["data"]
     end = datetime.fromtimestamp(d["period_end"], TZ)
-    title = {"morning": "Morning", "afternoon": "Afternoon"}.get(d["slot"], d["slot"].capitalize())
+    title, covers = EDITIONS.get(d["slot"], (d["slot"].capitalize(), ""))
     onpage = set()
     for e in data["entries"]:
         onpage.update(e.get("posts") or e.get("ids") or [e.get("id")])
     return render_template(
-        "digest.html", d=d, data=data, posts=data["posts"], onpage=onpage, title=title,
+        "digest.html", d=d, data=data, posts=data["posts"], onpage=onpage, title=title, covers=covers,
         date=end.strftime("%A %-d %B"), since=local(d["period_start"], "%a %-I%p"), until=local(d["period_end"], "%a %-I%p"),
         minutes=round(herald_render_text.reading_minutes(data)), next_digest=next_digest())
 

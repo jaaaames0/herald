@@ -32,8 +32,11 @@ over 4 rounds, ~$2.60 of credit. Pipeline bugs found by the eval and fixed:
 story/draft index mismatch, quote mis-pairing and nested quotes, a checker
 model that inverted its verdicts, unbounded runs, single-quote loophole,
 `[p1, p2]` citations. Final configuration: plan DeepSeek V4.1 Flash, check
-Claude Haiku 5.5, vision Qwen 3.7 Flash; writer chosen by James from the
-Sonnet 5.5 / Kimi K2.6 side-by-side.
+Claude Haiku 5.5, vision Qwen 3.7 Flash, writer Claude Sonnet 5.5 (James's
+choice from the side-by-side: better grouping, relevance and framing than
+Kimi K2.6 at ~3x the cost; ~$0.04/digest, ~$3/month). Editions are titled
+for the Australian time they arrive and the US session they cover; entries
+without a headline are separated by rules and run labels.
 
 ---
 
