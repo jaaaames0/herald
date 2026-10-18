@@ -69,7 +69,10 @@ def make_digest(conn, start, end, slot, models=MODELS, check=True):
         raise SystemExit(f"no posts between {start} and {end}")
     n, vcost = herald_vision.read_window(conn, posts, log=log)
     log(f"[vision] read {n} images cost=${vcost:.4f}")
-    data = herald_edit.build(herald_edit.Window(posts, start, end, conn), models, log=log, check=check)
+    previous = herald_edit.previously(herald_store.previous_digests(conn, start))
+    log(f"[digest] {len(previous)} stories from the last editions")
+    data = herald_edit.build(herald_edit.Window(posts, start, end, conn), models, log=log, check=check,
+                             previous=previous)
     data["cost_usd"] = round(data["cost_usd"] + vcost, 5)
     data["vision"] = {"images_read": n, "cost_usd": round(vcost, 5), "model": herald_vision.MODEL}
     for issue in data["issues"]:

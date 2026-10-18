@@ -7,7 +7,9 @@ Three model calls:
             what each selected thing is: a post that stands alone, a run of
             posts by one person, or a story many accounts are reacting to.
 2. check  - every proposed story is checked: does each post really respond to
-            the same specific thing? Posts that don't are removed.
+            the same specific thing? Posts that don't are removed. A story
+            the reader already read in a recent edition is kept only if it
+            has something new, and is then written as an update.
 3. write  - stories are written from their posts' full cards. Every quoted
             phrase is checked verbatim against the source material and every
             citation against the story's posts; failures are retried once and
@@ -224,6 +226,8 @@ What to select: the things that most of the feed was talking about this session 
 
 Size: about {stories} stories and at most {posts} posts/runs for this window - fewer if the window is quiet. The whole digest must fit in 10-15 minutes of reading, so choose; don't list everything good. Give every entry a "priority": 1 = the reader must see this (anything the whole feed reacted to, the very best jokes and images), 2 = strong, 3 = nice to have (dropped first if the digest runs long).
 
+You may get PREVIOUSLY: the stories the reader read in the last editions. Don't run the same story with the same angle again. A continuing story earns a place only for what is new since then - a new development, number, reversal or turn, or a clearly new argument - and its subject should name that new thing (e.g. "Limoges city hall collapses as looting spreads to Bordeaux", not "riots in France"). If nothing is new, leave it out (or keep its single best new post as a POST) and use the room for something else.
+
 Order the entries as a read: lead with the biggest story, then mix stories, runs and posts so similar things sit together and the reader moves through the session naturally. Put lighter items between heavier ones.
 
 Return a JSON object:
@@ -239,16 +243,21 @@ CHECK_SYSTEM = """You check an editor's groupings before publication. Each story
 
 You may also get SETUPS: short lines the editor wrote to introduce a post. A setup is supported only if everything it states is shown in that post's card (its text, what it replies to or quotes, image text, link preview). A setup that adds a name, number, event or claim not in the card is unsupported, even if it is true.
 
-Return a JSON object: {"stories": [{"index": 0, "verdicts": [{"id": "p3", "belongs": true}, {"id": "p11", "belongs": false, "reason": "about a different event: ..."}]}], "setups": [{"id": "p14", "supported": true}, {"id": "p20", "supported": false, "reason": "..."}]}. Give a reason only for a false verdict. Return only the JSON."""
+You may also get PREVIOUSLY: stories the reader already read in recent editions, numbered. For each story, give "previous": the number of the earlier story it continues (the same ongoing event or argument), or null. If it continues one, give "fresh": true only if these posts establish something the earlier piece did not: a new development, event, number, reversal or turn, or a substantially new argument. More reactions, clips or jokes about what the earlier piece already covered are not fresh. With "fresh": true, give "new": one sentence naming what is new.
+
+Return a JSON object: {"stories": [{"index": 0, "previous": null, "verdicts": [{"id": "p3", "belongs": true}, {"id": "p11", "belongs": false, "reason": "about a different event: ..."}]}, {"index": 1, "previous": 2, "fresh": true, "new": "...", "verdicts": [...]}], "setups": [{"id": "p14", "supported": true}, {"id": "p20", "supported": false, "reason": "..."}]}. Give a reason only for a false verdict. Return only the JSON."""
 
 WRITE_SYSTEM = READER + """
 
 You write the stories in this reader's digest. For each story you get the subject the editor chose and the full cards of the posts involved (with what they reply to, what they quote, image readings and link previews).
 
-Write like a sharp, well-read friend who has been on the timeline all day: specific, dry, quick, a little wry when the material is funny. Lead with what actually happened, as established by the posts and their sources, then how the people in the feed reacted - who said what, where they disagree, the best lines. Let their voices carry it: quote short snippets verbatim and attribute them, e.g. "the snippet" — @handle [p9].
+Write like a sharp, well-read friend who has been on the timeline all day: specific, dry, quick, a little wry when the material is funny. Lead with what actually happened, as established by the posts and their sources, then how the people in the feed reacted - who said what, where they disagree, the best lines. Let their voices carry it: quote short snippets verbatim and attribute them, e.g. @handle called it "the snippet" [p9]. The citation is shown as a link on the @handle you name, so name each account once per sentence and don't repeat it after the quote. If you don't name the account, the citation itself shows its handle.
+
+Some stories are marked CONTINUING: the reader read an earlier piece on the same story (shown). Write these as continuing coverage: open with what has happened or changed since, and how the conversation has shifted. Assume the reader remembers the earlier piece - recap in one short clause at most, and don't retell or re-quote what it covered.
 
 Rules, which are checked mechanically:
 - Every paragraph cites at least one post by id, like [p9], and every factual claim is supported by a cited card. Use only the ids given for that story.
+- Never repeat a quotation used in the earlier piece of a CONTINUING story.
 - Use double quotation marks only for quoting a post; inside a quotation use single quotes.
 - Text in quotation marks must be copied exactly from the cited post, its quoted posts, its parent, its image text or its link preview. Do not tidy, translate or combine quotes. If you are not sure of the exact words, paraphrase without quotation marks.
 - Add nothing the cards don't establish: no outside facts, no numbers, dates, names or outcomes that aren't in them. If the posts disagree about a fact, say so.
@@ -317,8 +326,15 @@ def quote_ok(quote, sources):
     return bool(pieces) and all(any(piece in h for h in hay) for piece in pieces)
 
 
-def check_body(body, allowed, window):
-    """Return a list of problems with a story body."""
+def _requoted(quote, earlier):
+    return bool(earlier) and _norm(quote)[:60] in _norm(earlier)
+
+
+def check_body(body, allowed, window, earlier=""):
+    """Return a list of problems with a story body.
+
+    `earlier` is the text of a previous edition's piece this one continues.
+    """
     problems = []
     material = [t for sid in allowed if sid in window.post for t in window.material(sid)]
     for para in [p for p in body.split("\n\n") if p.strip()]:
@@ -334,11 +350,13 @@ def check_body(body, allowed, window):
     for q in quotes:
         if not quote_ok(q, material):
             problems.append(f"quoted text not found verbatim in the cited material: \"{q[:120]}\"")
+        elif _requoted(q, earlier):
+            problems.append(f"already quoted in the earlier piece the reader has read: \"{q[:120]}\"")
     return problems
 
 
-def repair_body(body, allowed, window):
-    """Drop sentences with unverifiable quotes or foreign citations; drop uncited paragraphs."""
+def repair_body(body, allowed, window, earlier=""):
+    """Drop sentences with unverifiable or repeated quotes or foreign citations; drop uncited paragraphs."""
     material = [t for sid in allowed if sid in window.post for t in window.material(sid)]
     out = []
     for para in [p for p in body.split("\n\n") if p.strip()]:
@@ -348,7 +366,7 @@ def repair_body(body, allowed, window):
             if any(c not in allowed for c in _CITE.findall(s)):
                 continue
             quotes, balanced = quotes_in(s)
-            if not balanced or any(not quote_ok(q, material) for q in quotes):
+            if not balanced or any(not quote_ok(q, material) or _requoted(q, earlier) for q in quotes):
                 continue
             keep.append(s)
         para = " ".join(keep)
@@ -436,20 +454,43 @@ def match_written(written, stories, only=None):
 RUN_MAX = 4
 
 
+def previously(digests):
+    """Stories from earlier digests, with citations turned back into @handles."""
+    out = []
+    for d in digests:
+        posts = d["data"].get("posts") or {}
+        for e in d["data"].get("entries") or []:
+            if e.get("type") != "story" or not e.get("body"):
+                continue
+            body = _CITE.sub(lambda m: f"(@{posts[m.group(1)]['author']['handle']})" if m.group(1) in posts else "",
+                             e["body"])
+            out.append({"digest": d["id"], "slot": d["slot"], "end": d["period_end"],
+                        "headline": e.get("headline", ""), "subject": e.get("subject", ""), "body": body})
+    return out
+
+
 def size_for(hours):
     if hours <= 9:
         return 4, 22
     return 5, 26
 
 
-def build(window, models, log=print, check=True):
-    """Return the digest data dict for a Window."""
+def build(window, models, log=print, check=True, previous=()):
+    """Return the digest data dict for a Window.
+
+    `previous` is `previously(...)` for the last editions: repeats are dropped
+    and continuing stories are written as updates.
+    """
     usage, issues = [], []
     hours = (window.end - window.start) / 3600
     stories_n, posts_n = size_for(hours)
     cards = window.render()
     header = (f"Window: {_time(window.start)} to {_time(window.end)} UTC ({hours:.0f}h). "
               f"{window.size} posts from {window.authors} accounts.\n\n")
+    previous = list(previous)
+    if previous:
+        cards += "\n\n=====\n\nPREVIOUSLY (stories the reader has already read):\n" + "\n".join(
+            f"- {p['headline']}: {p['subject']}" for p in previous)
     plan = {}
     for attempt in range(2):
         plan = _call(models["plan"], PLAN_SYSTEM.format(stories=stories_n, posts=posts_n), header + cards,
@@ -490,20 +531,15 @@ def build(window, models, log=print, check=True):
             if not (t == "post" and e.get("id") in used):
                 issues.append(f"unusable entry dropped: {json.dumps(e)[:120]}")
 
-    # The planner tends to over-select; keep the best within the size asked for,
-    # by priority, without disturbing reading order.
-    singles = [e for e in entries if e["type"] != "story"]
-    if len(singles) > posts_n + 6:
-        ranked = sorted(range(len(singles)), key=lambda i: (singles[i].get("priority", 2), i))
-        keep = {id(singles[i]) for i in ranked[:posts_n + 6]}
-        for e in singles:
-            if id(e) not in keep:
-                issues.append(f"over plan size, dropped: {e.get('ids') or e.get('id')} (priority {e.get('priority')})")
-        entries = [e for e in entries if e["type"] == "story" or id(e) in keep]
     stories = [e for e in entries if e["type"] == "story"]
     setups = [e for e in entries if e["type"] != "story" and e.get("setup")]
+    earlier = {}  # id(story) -> text of the earlier piece it continues
+    repeats = 0
     if check and (stories or setups):
         text = []
+        if previous and stories:
+            text.append("PREVIOUSLY:\n\n" + "\n\n".join(
+                f"PREVIOUS {n}: {p['headline']}\n{p['body']}" for n, p in enumerate(previous)))
         for i, s in enumerate(stories):
             text.append(f"STORY {i}: {s['subject']}\n" + "\n\n".join(window.card(sid, full=False) for sid in s["posts"]))
         if setups:
@@ -528,13 +564,28 @@ def build(window, models, log=print, check=True):
             s["posts"] = [p for p in s["posts"] if p not in removed]
             s["feature"] = [p for p in s["feature"] if p not in removed]
             s["removed"] = list(removed)
+            prev = v.get("previous")
+            if previous and isinstance(prev, int) and 0 <= prev < len(previous):
+                p = previous[prev]
+                if v.get("fresh") is True:
+                    s["follows"] = {"digest": p["digest"], "slot": p["slot"], "headline": p["headline"],
+                                    "new": (v.get("new") or "").strip()}
+                    earlier[id(s)] = p["body"]
+                else:
+                    issues.append(f"repeat of {p['headline'][:50]!r} from an earlier edition, dropped: {s['subject'][:60]!r}")
+                    s["repeat"] = True
+                    repeats += 1
         for s in stories:
+            if s.get("repeat"):
+                continue
             accounts = {window.post[p]["author"]["handle"] for p in s["posts"]}
             if len(accounts) < 2:
                 issues.append(f"story dissolved after check (one account left): {s['subject'][:60]!r}")
                 s["dissolve"] = True
         new_entries = []
         for e in entries:
+            if e.get("repeat"):
+                continue
             if e.get("dissolve"):
                 new_entries += [{"type": "post", "id": p, "setup": ""} for p in e["posts"][:1]]
             else:
@@ -542,10 +593,27 @@ def build(window, models, log=print, check=True):
         entries = new_entries
         stories = [e for e in entries if e["type"] == "story"]
 
+    # The planner tends to over-select; keep the best within the size asked for,
+    # by priority, without disturbing reading order. A dropped repeat frees its
+    # room for other posts.
+    limit = posts_n + 6 + 3 * repeats
+    singles = [e for e in entries if e["type"] != "story"]
+    if len(singles) > limit:
+        ranked = sorted(range(len(singles)), key=lambda i: (singles[i].get("priority", 2), i))
+        keep = {id(singles[i]) for i in ranked[:limit]}
+        for e in singles:
+            if id(e) not in keep:
+                issues.append(f"over plan size, dropped: {e.get('ids') or e.get('id')} (priority {e.get('priority')})")
+        entries = [e for e in entries if e["type"] == "story" or id(e) in keep]
+
     if stories:
         text = []
         for i, s in enumerate(stories):
-            text.append(f"STORY {i}\nSubject: {s['subject']}\nWhy it matters: {s['why']}\nPosts:\n\n"
+            cont = ""
+            if s.get("follows"):
+                cont = (f"CONTINUING: the reader read this earlier piece, \"{s['follows']['headline']}\":\n"
+                        f"{earlier[id(s)]}\nWhat is new now: {s['follows']['new']}\n")
+            text.append(f"STORY {i}\nSubject: {s['subject']}\nWhy it matters: {s['why']}\n{cont}Posts:\n\n"
                         + "\n\n".join(window.card(sid) for sid in s["posts"]))
         written = _call(models["write"], WRITE_SYSTEM, "\n\n=====\n\n".join(text), 12000, log, "write", usage,
                         models.get("write_effort"))
@@ -554,14 +622,15 @@ def build(window, models, log=print, check=True):
         for i, s in enumerate(stories):
             w = by_idx.get(i) or {}
             s["headline"], s["body"] = (w.get("headline") or s["subject"]).strip(), normalise_cites(w.get("body") or "").strip()
-            s["problems"] = check_body(s["body"], s["posts"], window) if s["body"] else ["empty body"]
+            s["problems"] = check_body(s["body"], s["posts"], window, earlier.get(id(s), "")) if s["body"] else ["empty body"]
             if s["problems"]:
                 retry.append(i)
         if retry:
             text = []
             for i in retry:
                 s = stories[i]
-                text.append(f"STORY {i}\nSubject: {s['subject']}\nYour previous draft:\n{s['body']}\n\n"
+                cont = f"CONTINUING; the earlier piece the reader read:\n{earlier[id(s)]}\n" if s.get("follows") else ""
+                text.append(f"STORY {i}\nSubject: {s['subject']}\n{cont}Your previous draft:\n{s['body']}\n\n"
                             f"Problems found:\n- " + "\n- ".join(s["problems"]) + "\n\nPosts:\n\n"
                             + "\n\n".join(window.card(sid) for sid in s["posts"]))
             fixed = _call(models["write"], WRITE_SYSTEM + "\n\nYou are revising drafts that failed the checks. Fix every listed problem.",
@@ -571,10 +640,10 @@ def build(window, models, log=print, check=True):
                     stories[i]["body"] = normalise_cites(w["body"]).strip()
                     stories[i]["headline"] = (w.get("headline") or stories[i]["headline"]).strip()
         for s in stories:
-            problems = check_body(s["body"], s["posts"], window)
+            problems = check_body(s["body"], s["posts"], window, earlier.get(id(s), ""))
             if problems:
                 issues += [f"{s['headline'][:50]!r}: {p}" for p in problems]
-                s["body"] = repair_body(s["body"], s["posts"], window)
+                s["body"] = repair_body(s["body"], s["posts"], window, earlier.get(id(s), ""))
             s.pop("problems", None)
         dropped = [s for s in stories if not s["body"]]
         for s in dropped:

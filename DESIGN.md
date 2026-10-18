@@ -65,13 +65,21 @@ pipelines (~10k → ~1.7k lines).
   accounts (or 2 plus the original source) responding to one specific thing,
   and the per-post test for membership. Entries carry priorities.
 - **Check**: a separate model gives a belongs/doesn't verdict per story post;
-  non-members are removed; a story left with one account dissolves.
+  non-members are removed; a story left with one account dissolves. The
+  stories from the last two editions are shown to the planner and the checker;
+  a story continuing one of them is kept only if its posts establish something
+  new (a development, number, reversal, or a new argument), and is then
+  written as an update — opening with what changed, not re-quoting the earlier
+  piece (checked mechanically) — and labelled "Continuing" with a link back.
+  A repeat is dropped and its room goes to other posts.
 - **Write**: stories only, from full cards. Mechanical checks: every paragraph
   cites; citations must be the story's posts; every quoted span (double or
   single quotes) must appear verbatim (case, quote style and sentence
   punctuation ignored) in the cited material — post text, quoted posts, parent,
   image text, link preview. Failures go back for one revision with the problem
-  list, then offending sentences are cut.
+  list, then offending sentences are cut. On the page, a citation becomes a
+  link on the @handle the sentence already names; otherwise it shows the
+  handle itself.
 - **Trim** to `HERALD_READ_MINUTES` (14): drop priority-3 posts, then shorten
   runs, then priority-2 posts. Long posts fold after 90 words, as on X.
 

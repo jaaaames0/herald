@@ -23,7 +23,8 @@ hourly     herald.py collect   one `bird home --following` read (200 cards ≈ 3
              2. plan  – one call sees EVERY post in the window as a card and picks
                         posts / runs / stories, with priorities
              3. check – a second model verifies each story's posts are about the
-                        same specific thing; strays are removed
+                        same specific thing; strays are removed; a story already
+                        run in the last two editions stays only as an update
              4. write – stories written from their posts' full cards; every quote
                         is checked verbatim and every citation against the
                         story's posts; failures are revised once, then cut

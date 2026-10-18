@@ -3,15 +3,18 @@
 <div class="text">{{ head | post_html }}{% if rest %}<details><summary> … show more</summary>{{ (" " ~ rest) | post_html }}</details>{% endif %}</div>
 {%- endmacro %}
 
+{# Known dimensions reserve the image's space, so the page doesn't shift while it loads. #}
+{% macro dims(m) -%}{% if m.w and m.h %}width="{{ m.w }}" height="{{ m.h }}"{% endif %}{%- endmacro %}
+
 {% macro media(items) -%}
 {% if items %}
 <div class="media">
   {% for m in items %}
   <figure>
     {% if m.type == "photo" %}
-      <a href="{{ m.url }}?name=large" target="_blank" rel="noopener noreferrer"><img src="{{ m.url | image_src }}" alt="{{ (m.alt or (m.reading or {}).get('description') or '')[:300] }}" loading="lazy" referrerpolicy="no-referrer"></a>
+      <a href="{{ m.url }}?name=large" target="_blank" rel="noopener noreferrer"><img src="{{ m.url | image_src }}" alt="{{ (m.alt or (m.reading or {}).get('description') or '')[:300] }}" {{ dims(m) }} loading="lazy" referrerpolicy="no-referrer"></a>
     {% else %}
-      <span class="video"><img src="{{ m.url }}" alt="video" loading="lazy" referrerpolicy="no-referrer"></span>
+      <span class="video"><img src="{{ m.url }}" alt="video" {{ dims(m) }} loading="lazy" referrerpolicy="no-referrer"></span>
     {% endif %}
     {% set r = m.reading or {} %}
     {% if r.get('text') %}

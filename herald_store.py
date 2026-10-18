@@ -150,6 +150,19 @@ def get_digest(conn, digest_id=None):
     return d
 
 
+def previous_digests(conn, before, limit=2):
+    """The last scheduled editions that ended by `before` (manual and eval runs don't count)."""
+    rows = conn.execute(
+        "SELECT * FROM digests WHERE slot IN ('morning', 'afternoon') AND period_end <= ? "
+        "ORDER BY period_end DESC, id DESC LIMIT ?", (before + 3600, limit)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["data"] = json.loads(d["data"])
+        out.append(d)
+    return out
+
+
 def list_digests(conn, limit=60):
     return [dict(r) for r in conn.execute(
         "SELECT id, slot, period_start, period_end, created_at, model, cost_usd FROM digests ORDER BY id DESC LIMIT ?",

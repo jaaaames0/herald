@@ -217,6 +217,42 @@ class BuildTest(unittest.TestCase):
         self.assertAlmostEqual(data["cost_usd"], 0.004)
         self.assertEqual(next(e for e in data["entries"] if e.get("id") == "p6")["setup"], "")  # unsupported setup dropped
 
+    def test_repeats_dropped_and_continuing_stories_marked(self):
+        conn = herald_store.connect(os.path.join(TMP, "continuity.db"))
+        earlier = {"entries": [{"type": "story", "headline": "Treasury buybacks", "subject": "Treasury doubles buybacks",
+                                "posts": ["p1"], "body": 'They said "post number 5 about the treasury" [p1].'}],
+                   "posts": {"p1": {"author": {"handle": "old"}}}}
+        herald_store.save_digest(conn, "morning", -8 * 3600, 0, "m", 0.01, earlier)
+        herald_store.save_digest(conn, "manual", -8 * 3600, 0, "m", 0.01, earlier)   # not an edition
+        conn.commit()
+        previous = herald_edit.previously(herald_store.previous_digests(conn, 0))
+        self.assertEqual(len(previous), 1)
+        self.assertIn("(@old)", previous[0]["body"])
+        plan = {"mood": "", "entries": [
+            {"type": "story", "priority": 1, "subject": "Treasury buybacks again", "posts": ["p1", "p2", "p3"]},
+            {"type": "story", "priority": 1, "subject": "Treasury reverses buybacks", "posts": ["p4", "p5", "p6"]},
+            {"type": "post", "priority": 2, "id": "p9"}]}
+        check = {"stories": [{"index": 0, "previous": 0, "fresh": False, "verdicts": []},
+                             {"index": 1, "previous": 0, "fresh": True, "new": "The Treasury reversed course.", "verdicts": []}]}
+        write = {"stories": [{"index": 0, "headline": "Reversal", "body":
+                              'Now "post number 4 about the treasury" [p4]. Still "post number 5 about the treasury" [p5].'}]}
+        chat, calls = fake_chat_factory({"plan": plan, "check": check, "write": write})
+        with mock.patch.object(herald_llm, "chat", chat):
+            data = herald_edit.build(self.window(), {"plan": "m", "check": "m", "write": "m"}, log=lambda m: None,
+                                     previous=previous)
+        stories = [e for e in data["entries"] if e["type"] == "story"]
+        self.assertEqual([s["subject"] for s in stories], ["Treasury reverses buybacks"])   # repeat dropped
+        self.assertEqual(stories[0]["follows"]["new"], "The Treasury reversed course.")
+        self.assertIn("post number 4", stories[0]["body"])
+        self.assertNotIn("post number 5", stories[0]["body"])                             # re-quote cut
+        self.assertTrue(any("repeat of" in i for i in data["issues"]))
+        did = herald_store.save_digest(conn, "afternoon", 0, 8 * 3600, "m", 0.01, data)
+        conn.commit()
+        import herald_web
+        with herald_web.app.test_request_context():
+            page = herald_web.render_digest(herald_store.get_digest(conn, did))
+        self.assertIn('Continuing · <a href="/d/1">', page)
+
     def test_trims_to_reading_budget(self):
         long = " ".join(["word"] * 85)
         posts = [make_post(str(i), f"u{i}", long, 100 + i) for i in range(1, 80)]
@@ -255,13 +291,18 @@ class WebTest(unittest.TestCase):
             {"type": "story", "priority": 1, "subject": "s", "posts": ["p1", "p2"], "feature": ["p1"]},
             {"type": "run", "priority": 2, "ids": ["p3", "p4"], "setup": "two posts"},
             {"type": "post", "priority": 1, "id": "p5", "setup": "<b>escaped</b>"}]},
-            "check": {"stories": []}, "write": {"stories": [{"index": 0, "headline": "H", "body": "Body [p1][p2]."}]}})
+            "check": {"stories": []}, "write": {"stories": [{"index": 0, "headline": "H", "body": "@user1 said it [p1], and so did someone [p2]."}]}})
         with mock.patch.object(herald_llm, "chat", chat):
             data = herald_edit.build(w, {"plan": "m", "check": "m", "write": "m"}, log=lambda m: None)
         did = herald_store.save_digest(conn, "afternoon", 0, 8 * 3600, "m", 0.01, data)
         conn.commit()
         page = client.get(f"/d/{did}").data.decode()
-        self.assertIn('href="#p1"', page)                                        # on-page source
+        self.assertIn('<a class="cite named" href="#p1" data-sid="p1">@user1</a> said it,', page)  # named once
+        self.assertIn('someone <a class="cite" href="#p2"', page)                # unnamed: citation shows the handle
+        two = {"p1": {"author": {"handle": "ann"}, "url": "u1"}, "p2": {"author": {"handle": "ann"}, "url": "u2"}}
+        self.assertEqual(str(herald_web.prose_html("@ann twice [p1] [p2].", two, {"p1", "p2"})),
+                         '<p><a class="cite named" href="#p1" data-sid="p1">@ann</a> twice '
+                         '<a class="cite" href="#p2" data-sid="p2">↗</a>.</p>')
         self.assertIn('href="https://x.com/user8/status/8"', page)               # off-page source opens on X
         self.assertIn("&lt;b&gt;escaped&lt;/b&gt;", page)
         self.assertIn("You're caught up", page)

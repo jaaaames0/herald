@@ -13,6 +13,7 @@
 {% for e in data.entries %}
   {% if e.type == "story" %}
   <section class="entry story">
+    {% if e.follows %}<p class="kicker">Continuing · <a href="/d/{{ e.follows.digest }}">earlier: {{ e.follows.headline }}</a></p>{% endif %}
     <h2>{{ e.headline }}</h2>
     <div class="body">{{ prose_html(e.body, posts, onpage) }}</div>
     {% for sid in e.feature or [] %}{{ card(posts[sid], sid) }}{% endfor %}

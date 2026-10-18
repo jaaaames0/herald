@@ -4,6 +4,24 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 
 ---
 
+## 2026-10-18 — First notes: continuity, attributions, citation jumps
+
+From James's read of the first two editions (both led with the French riots):
+- **No repeated stories.** The planner and checker see the last two editions'
+  stories. A continuing story stays only with something new and is written as
+  an update ("Continuing", linked to the earlier edition); quotes the earlier
+  piece used are rejected; a repeat is dropped and frees room. Replay of the
+  2026-10-18 afternoon window: France reran as an update led by the Limoges
+  collapse and the looting, and the freed story slot went to CFB Wainwright.
+- **One attribution, not two.** A citation now links the @handle the sentence
+  names instead of adding a second "@handle" chip (a further post by the same
+  account shows as ↗). The writer is told the same.
+- **Citation jumps land.** Images now carry their dimensions so the page
+  doesn't shift while they load; for older posts without them, the page
+  holds the target in place as images above it load.
+
+---
+
 ## 2026-10-17 — Reset: feed-first digest (diagnosis, eval, rebuild)
 
 **Diagnosis** (read-only, August database and logs):

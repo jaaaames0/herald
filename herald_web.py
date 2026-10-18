@@ -53,22 +53,44 @@ def post_html(text):
     return Markup(out)
 
 
+CITES = re.compile(r"(?:\s*\[[pr]\d+\])+")
+
+
 def prose_html(text, posts, onpage=()):
     """Editor/writer prose: escape, paragraphs, and turn [p12] into a link to the source.
 
-    Sources shown on the page are linked in place; others open the post on X.
+    If the sentence before a citation already names the post's author (@handle),
+    that name becomes the link and the citation disappears (a second post by
+    the same account shows as ↗); otherwise the citation shows as @handle. Sources shown on the page are linked in place;
+    others open the post on X.
     """
-    def cite(m):
-        sid = m.group(1)
-        p = posts.get(sid)
-        if not p:
-            return ""
-        handle = html.escape(p["author"]["handle"])
+    def link(sid, label, cls="cite"):
         if sid in onpage:
-            return f'<a class="cite" href="#{sid}" data-sid="{sid}">@{handle}</a>'
-        return f'<a class="cite" href="{html.escape(p["url"])}" target="_blank" rel="noopener">@{handle}</a>'
+            return f'<a class="{cls}" href="#{sid}" data-sid="{sid}">{label}</a>'
+        return f'<a class="{cls}" href="{html.escape(posts[sid]["url"])}" target="_blank" rel="noopener">{label}</a>'
+
+    def para(p):
+        out, last = [], 0
+        for m in CITES.finditer(p):
+            span, chips = html.escape(p[last:m.start()], quote=False), []
+            for sid in CITE.findall(m.group(0)):
+                if sid not in posts:
+                    continue
+                handle = html.escape(posts[sid]["author"]["handle"])
+                named = re.compile(rf"(?<![\w>]){re.escape('@' + handle)}(?!\w)", re.I)
+                if named.search(span):
+                    span = named.sub(lambda n: link(sid, n.group(0), "cite named"), span, count=1)
+                elif re.search(rf">@{re.escape(handle)}</a>", span, re.I):
+                    chips.append(link(sid, "↗"))       # another post by an account already named here
+                else:
+                    chips.append(link(sid, f"@{handle}"))
+            out.append(span + "".join(" " + c for c in chips))
+            last = m.end()
+        out.append(html.escape(p[last:], quote=False))
+        return "".join(out)
+
     paras = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
-    return Markup("".join(f"<p>{CITE.sub(cite, html.escape(p, quote=False))}</p>" for p in paras))
+    return Markup("".join(f"<p>{para(p)}</p>" for p in paras))
 
 
 def fold(text, words=herald_render_text.FOLD_WORDS):

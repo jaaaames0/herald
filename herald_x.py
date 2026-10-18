@@ -14,7 +14,7 @@ Post shape:
       "posted_at"  unix time the author posted it,
       "text"       full text; media/quote t.co stubs removed, other t.co
                    links replaced by their expanded URL,
-      "media": [{"type": "photo"|"video"|"animated_gif", "url", "alt"}],
+      "media": [{"type": "photo"|"video"|"animated_gif", "url", "alt", "w", "h"}],
       "card": {"title", "description", "domain", "url"} | None,
       "links": [expanded external URLs],
       "quoted_id", "quoted": <post> | None,
@@ -115,8 +115,10 @@ def _media(legacy):
     for m in (legacy.get("extended_entities") or {}).get("media") or []:
         url = m.get("media_url_https") or m.get("media_url")
         if url:
+            info = m.get("original_info") or {}
             out.append({"type": m.get("type") or "photo", "url": url,
-                        "alt": (m.get("ext_alt_text") or "").strip()})
+                        "alt": (m.get("ext_alt_text") or "").strip(),
+                        "w": info.get("width"), "h": info.get("height")})
     return out
 
 

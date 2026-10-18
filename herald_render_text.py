@@ -45,7 +45,7 @@ def render(data):
     posts = data["posts"]
     for e in data["entries"]:
         if e["type"] == "story":
-            lines += ["", f"## {e['headline']}", e["body"], ""]
+            lines += ["", f"## {e['headline']}"] + ([f"(continuing: {e['follows']['new']})"] if e.get("follows") else []) + [e["body"], ""]
             for sid in e.get("feature") or []:
                 lines += ["  > " + l for l in _post_lines(posts[sid])]
             lines.append("  sources: " + " ".join(f"[{s}] @{posts[s]['author']['handle']}" for s in e["posts"]))
