@@ -1,6 +1,7 @@
 """Herald web UI: the digest is the page.
 
 Routes: /  (latest digest)   /d/<id>   /archive   /debug
+        /partial.html  (latest headlines, embedded on the jaaaames.com homepage)
 Read-only. Posts are rendered from the stored digest, never rewritten.
 """
 
@@ -10,7 +11,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from flask import Flask, abort, render_template
+from flask import Flask, abort, render_template, request
 from markupsafe import Markup
 
 import herald_env
@@ -22,11 +23,11 @@ import herald_store  # noqa: E402
 
 TZ = ZoneInfo(os.environ.get("HERALD_TZ", "Australia/Sydney"))
 SLOT_HOURS = {"morning": 6, "afternoon": 14}
-# Named for the Australian time they arrive; each covers a US session.
-EDITIONS = {
-    "morning": ("Morning edition", "the US day, overnight here"),
-    "afternoon": ("Afternoon edition", "the US evening and the Australian day"),
-}
+# Named for the Australian time they arrive.
+EDITIONS = {"morning": "Morning edition", "afternoon": "Afternoon edition"}
+PUBLIC_URL = "https://herald.jaaaames.com"
+# Sites allowed to embed /partial.html.
+EMBED_ORIGINS = {"https://jaaaames.com", "https://www.jaaaames.com"}
 
 app = Flask(__name__)
 
@@ -120,17 +121,18 @@ def next_digest(now=None):
     return ""
 
 
+def edition(d):
+    return EDITIONS.get(d["slot"], d["slot"].capitalize()), datetime.fromtimestamp(d["period_end"], TZ).strftime("%A %-d %B")
+
+
 def render_digest(d):
     data = d["data"]
-    end = datetime.fromtimestamp(d["period_end"], TZ)
-    title, covers = EDITIONS.get(d["slot"], (d["slot"].capitalize(), ""))
+    title, date = edition(d)
     onpage = set()
     for e in data["entries"]:
         onpage.update(e.get("posts") or e.get("ids") or [e.get("id")])
-    return render_template(
-        "digest.html", d=d, data=data, posts=data["posts"], onpage=onpage, title=title, covers=covers,
-        date=end.strftime("%A %-d %B"), since=local(d["period_start"], "%a %-I%p"), until=local(d["period_end"], "%a %-I%p"),
-        minutes=round(herald_render_text.reading_minutes(data)), next_digest=next_digest())
+    return render_template("digest.html", d=d, data=data, posts=data["posts"], onpage=onpage, title=title,
+                           date=date, next_digest=next_digest())
 
 
 @app.route("/")
@@ -149,6 +151,26 @@ def digest(digest_id):
     if not d:
         abort(404)
     return render_digest(d)
+
+
+@app.route("/partial.html")
+def partial():
+    """The latest edition's headlines, for the jaaaames.com homepage to embed."""
+    conn = herald_store.connect()
+    d = herald_store.get_digest(conn)
+    if not d:
+        return "", 204
+    title, date = edition(d)
+    stories = [(e["headline"], f"{PUBLIC_URL}/d/{d['id']}#e{i}")
+               for i, e in enumerate(d["data"]["entries"], 1) if e["type"] == "story" and e.get("headline")]
+    resp = app.response_class(render_template("partial.html", title=title, date=date, stories=stories[:3],
+                                              url=f"{PUBLIC_URL}/d/{d['id']}"))
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    origin = request.headers.get("Origin")
+    if origin in EMBED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    return resp
 
 
 @app.route("/archive")

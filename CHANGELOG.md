@@ -4,6 +4,16 @@ Newest first. Dates in AEST (Australia/Sydney, GMT+10) unless noted.
 
 ---
 
+## 2026-10-19 — Plainer header; homepage headlines
+
+- The edition header is just "Morning edition, Monday 19 October": the
+  coverage line, window times, counts and reading time are gone.
+- `/partial.html` publishes the latest edition's first three story headlines
+  (linked to each story, `#e<n>`) in the markup the jaaaames.com homepage's
+  `#digest-preview` already uses, with CORS for jaaaames.com.
+
+---
+
 ## 2026-10-18 — First notes: continuity, attributions, citation jumps
 
 From James's read of the first two editions (both led with the French riots):

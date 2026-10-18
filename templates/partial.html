@@ -1,0 +1,9 @@
+{# Same markup as the homepage's earlier digest partial, so its existing styles apply. #}
+<div id="digest-preview">
+  <p class="digest-label">{{ title | lower }} · {{ date }}</p>
+  <ul>
+    {% for headline, href in stories %}<li><a href="{{ href }}">{{ headline }}</a></li>
+    {% endfor %}
+  </ul>
+  <a href="{{ url }}" class="digest-more">read the full edition →</a>
+</div>

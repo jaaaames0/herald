@@ -46,7 +46,7 @@ Typical cost: ~$0.01–0.05 per digest including vision (see DESIGN.md).
 | `herald_edit.py` | the editor: window cards, plan/check/write prompts, verbatim checks, trimming |
 | `herald_llm.py` | NanoGPT chat client (stdlib) |
 | `herald_render_text.py` | plain-text rendering and the reading-time estimate |
-| `herald_web.py`, `templates/` | Flask UI: `/`, `/d/<id>`, `/archive`, `/debug` |
+| `herald_web.py`, `templates/` | Flask UI: `/`, `/d/<id>`, `/archive`, `/debug`; `/partial.html` (latest three headlines, CORS-allowed for jaaaames.com, whose homepage embeds it) |
 | `test_herald.py` | tests (no network) |
 | `eval/` | the quality eval: real windows, references, scoring (DESIGN.md §Eval) |
 | `deploy/` | systemd units and `release.sh` (build / switch with checkpoint) |

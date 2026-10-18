@@ -4,15 +4,13 @@
 {% block content %}
 <header class="digest">
   <h1>{{ title }}, {{ date }}</h1>
-  {% if covers %}<div class="covers">{{ covers }}</div>{% endif %}
-  <div class="meta">{{ since }} – {{ until }} Sydney time · {{ data.window.posts }} posts from {{ data.window.authors }} accounts · ~{{ minutes }} min</div>
 </header>
 
 {% if data.mood %}<div class="mood">{{ prose_html(data.mood, posts, onpage) }}</div>{% endif %}
 
 {% for e in data.entries %}
   {% if e.type == "story" %}
-  <section class="entry story">
+  <section class="entry story" id="e{{ loop.index }}">
     {% if e.follows %}<p class="kicker">Continuing · <a href="/d/{{ e.follows.digest }}">earlier: {{ e.follows.headline }}</a></p>{% endif %}
     <h2>{{ e.headline }}</h2>
     <div class="body">{{ prose_html(e.body, posts, onpage) }}</div>

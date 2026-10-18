@@ -306,6 +306,12 @@ class WebTest(unittest.TestCase):
         self.assertIn('href="https://x.com/user8/status/8"', page)               # off-page source opens on X
         self.assertIn("&lt;b&gt;escaped&lt;/b&gt;", page)
         self.assertIn("You're caught up", page)
+        self.assertIn("<h1>Afternoon edition, Thursday 1 January</h1>\n</header>", page)
+        self.assertIn('<section class="entry story" id="e3">', page)
+        part = client.get("/partial.html", headers={"Origin": "https://jaaaames.com"})
+        self.assertEqual(part.headers["Access-Control-Allow-Origin"], "https://jaaaames.com")
+        self.assertIn(f'<a href="https://herald.jaaaames.com/d/{did}#e3">H</a>', part.data.decode())
+        self.assertNotIn("Access-Control-Allow-Origin", client.get("/partial.html", headers={"Origin": "https://evil.example"}).headers)
         for path in ("/", "/archive", "/debug"):
             self.assertEqual(client.get(path).status_code, 200)
         self.assertEqual(client.get("/d/999").status_code, 404)
